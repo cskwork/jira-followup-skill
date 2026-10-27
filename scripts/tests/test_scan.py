@@ -98,26 +98,26 @@ class SelectIntakeTest(unittest.TestCase):
 
 
 class RelatedIntakeTest(unittest.TestCase):
-    def test_other_assignee_recent_issue_is_attached_and_old_or_unrelated_is_not(self):
+    def test_other_assignee_recent_issue_is_attached_and_unrelated_is_not(self):
         calls = []
         def search(argv):
             calls.append(argv)
-            def issue(key, summary, created, updated):
-                return {'key': key, 'fields': {'summary': summary, 'created': created, 'updated': updated,
-                                              'assignee': {'accountId': OTHER}}}
-            return [issue('PROJ-1406', '사용자 진단 첫 진입 미응시 안내', '2026-10-21T19:00:00+09:00', ''),
-                    issue('PROJ-1407', '사용자 진단 결과 안내', '2026-01-01T00:00:00+09:00', '2026-10-20T00:00:00+09:00'),
-                    issue('PROJ-999', '사용자 진단 이동', '2026-01-01T00:00:00+09:00', ''),
-                    issue('PROJ-1405', '사용자 진단 이동', '2026-10-21T00:00:00+09:00', ''),
-                    issue('OTHER-3', '사용자 진단 이동', '2026-10-21T00:00:00+09:00', ''),
-                    issue('PROJ-1408', '로그인 비밀번호', '2026-10-21T00:00:00+09:00', '')]
-        related = find_related('PROJ-1405', '사용자 진단 다음 무한 로딩', search=search,
-                               now=datetime.fromisoformat('2026-10-22T09:00:00+09:00'))
+            def issue(key, summary):
+                return {'key': key, 'fields': {'summary': summary, 'assignee': {'accountId': OTHER}}}
+            return [issue('PROJ-1406', '사용자 진단 첫 진입 미응시 안내'),
+                    issue('PROJ-1407', '사용자 진단 결과 안내'),
+                    issue('PROJ-1405', '사용자 진단 이동'),
+                    issue('OTHER-3', '사용자 진단 이동'),
+                    issue('PROJ-1408', '로그인 비밀번호')]
+        related = find_related('PROJ-1405', '사용자 진단 다음 무한 로딩', search=search)
         self.assertEqual([r['key'] for r in related], ['PROJ-1406', 'PROJ-1407'])
         jql = calls[0][calls[0].index('--jql') + 1]
         self.assertNotIn('assignee', jql)
         self.assertIn('created >= -7d OR updated >= -7d', jql)
         self.assertIn('--paginate', calls[0])
+        # acli search 는 created·updated 필드를 거부한다.
+        fields = calls[0][calls[0].index('--fields') + 1].split(',')
+        self.assertFalse({'created', 'updated'} & set(fields))
 
     def test_slug_names_and_documents_match_key_or_significant_tokens(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,6 +129,9 @@ class RelatedIntakeTest(unittest.TestCase):
             by_token.mkdir(parents=True)
             unrelated = root / '.scratch' / 'core-web-api'
             unrelated.mkdir()
+            body_token_only = root / '.scratch' / 'other-work'
+            body_token_only.mkdir()
+            (body_token_only / 'note.md').write_text('진단 결과를 다시 봤다')
             related = find_related('PROJ-1405', '[WEB] 사용자 진단 무한 로딩', search=lambda argv: [], workspace=root)
             self.assertEqual({r['path'] for r in related}, {str(by_key), str(by_token)})
             self.assertEqual({r['source'] for r in related}, {'slug'})

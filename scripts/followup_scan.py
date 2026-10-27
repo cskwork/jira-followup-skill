@@ -55,14 +55,17 @@ def significant_tokens(text):
             if len(token) >= 2 and token not in TOKEN_STOP}
 
 
-def find_related(key, summary, *, search=None, workspace=None, now=None):
-    """후보만 찾는다. 담당자·중복 여부·작업 권한은 판정하지 않는다."""
+def find_related(key, summary, *, search=None, workspace=None):
+    """후보만 찾는다. 담당자·중복 여부·작업 권한은 판정하지 않는다.
+
+    최근 7일 조건은 RELATED_JQL 이 맡는다. acli search 는 --fields 에 created·updated 를 받지 않는다
+    (`fields 'created, updated' are not allowed` → 모든 백로그 접수가 related-search-failed 로 멈춤).
+    """
     rows = (search or acli)(['search', '--jql', RELATED_JQL, '--fields',
-                            'key,summary,created,updated,assignee', '--json', '--paginate'])
+                            'key,summary,assignee', '--json', '--paginate'])
     if not isinstance(rows, list):
         raise ValueError('invalid related search')
     tokens = significant_tokens(summary)
-    cutoff = (now or datetime.now(TZ)) - timedelta(days=7)
     related = []
     for row in rows:
         if not isinstance(row, dict):
@@ -71,12 +74,8 @@ def find_related(key, summary, *, search=None, workspace=None, now=None):
         if not isinstance(other, str) or not other.startswith(PROJECT + '-') or other == key:
             continue
         f = row.get('fields') or row
-        recent = False
-        for value in (f.get('created'), f.get('updated')):
-            if value:
-                recent |= datetime.fromisoformat(value.replace('Z', '+00:00')) >= cutoff
         shared = sorted(tokens & significant_tokens(f.get('summary') or ''))
-        if recent and shared:
+        if shared:
             related.append({'source': 'jira', 'key': other, 'summary': f.get('summary'),
                             'matchedTokens': shared})
     if workspace is not None:
@@ -87,6 +86,8 @@ def find_related(key, summary, *, search=None, workspace=None, now=None):
                 if not slug.is_dir():
                     continue
                 # 의도·계획 등 사람이 쓴 자료만 본다. 번들·바이너리·의존성은 읽지 않는다.
+                # 토큰은 slug 이름으로만 맞춘다. 문서 본문은 키로만 맞춘다(본문 토큰까지 보면 흔한 단어 하나로
+                # 거의 모든 slug 가 후보가 된다).
                 texts = [slug.name]
                 def walk_error(error):
                     raise error
@@ -99,7 +100,7 @@ def find_related(key, summary, *, search=None, workspace=None, now=None):
                             texts.append(path.read_text(encoding='utf-8', errors='replace'))
                 text = '\n'.join(texts)
                 matched_key = bool(re.search(r'(?<![A-Za-z0-9])' + re.escape(key) + r'(?!\d)', text, re.I))
-                shared = sorted(tokens & significant_tokens(text))
+                shared = sorted(tokens & significant_tokens(slug.name))
                 if matched_key or shared:
                     related.append({'source': 'slug', 'path': str(slug), 'matchedKey': matched_key,
                                     'matchedTokens': shared})
