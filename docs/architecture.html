@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jira follow-up 라인 · Swimlane</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&family=Noto+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #f5f5f5;
+      --color-ink:     #2d3142;
+      --color-muted:   #4f5d75;
+      --color-accent:  #bf4520;
+      --font-sans:     'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', 'Noto Serif', 'Noto Serif KR', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+
+    .frame { max-width: 1280px; width: 100%; min-width: 0; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+
+    .notes {
+      margin-top: 1.25rem;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      color: var(--color-muted);
+      list-style: none;
+    }
+    .notes code { font-family: var(--font-mono); font-size: 0.78rem; }
+
+    h2 {
+      font-family: var(--font-serif);
+      font-size: 1.35rem;
+      font-weight: 400;
+      margin: 2.25rem 0 0.75rem;
+    }
+    .lead { font-size: 0.95rem; line-height: 1.7; max-width: 60rem; }
+    table.roles { width: 100%; border-collapse: collapse; font-size: 0.85rem; line-height: 1.55; background: #ffffff; border: 1px solid rgba(45,49,66,0.12); border-radius: 6px; }
+    table.roles th, table.roles td { text-align: left; vertical-align: top; padding: 0.55rem 0.75rem; border-bottom: 1px solid rgba(45,49,66,0.08); }
+    table.roles th { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: var(--color-muted); }
+    table.roles td:first-child { font-weight: 600; white-space: nowrap; }
+    table.roles code, ol.steps code, .lead code { font-family: var(--font-mono); font-size: 0.76rem; }
+    .tag { font-family: var(--font-mono); font-size: 0.7rem; padding: 0.05rem 0.4rem; border: 1px solid rgba(45,49,66,0.25); border-radius: 2px; white-space: nowrap; }
+    .tag.acc { border-color: #bf4520; color: #bf4520; }
+    ol.steps { font-size: 0.88rem; line-height: 1.7; padding-left: 1.4rem; max-width: 60rem; }
+    ol.steps li { margin-bottom: 0.2rem; }
+    .case { font-weight: 600; margin: 1rem 0 0.35rem; font-size: 0.92rem; }
+    .hero { width: 100%; height: auto; display: block; border: 1px solid rgba(45,49,66,0.12); border-radius: 6px; margin-bottom: 0.75rem; }
+    svg { width: 100%; min-width: 1280px; display: block; }
+    @media print {
+      .diagram-container { overflow-x: visible; }
+      svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Swimlane · Jira follow-up harness</p>
+    <h1>싼 판정부터 거르고, 완료는 스크립트가 판정한다</h1>
+    <h2>세부 흐름 (누가 판정하나)</h2>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-title architecture-desc">
+        <title id="architecture-title">Jira follow-up 라인 아키텍처</title>
+        <desc id="architecture-desc">30분마다 도는 Jira follow-up 라인이 모델 없는 스크립트, 저가 luna 분류기, 고가 Sol 실행기, 사람 승인 순으로 필요할 때만 위 단계로 올라가는 흐름을 보여 준다.</desc>
+        <defs>
+          <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+            <circle cx="1" cy="1" r="0.9" fill="rgba(45,49,66,0.10)"/>
+          </pattern>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+        <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+        <!-- Lane dividers -->
+        <line x1="40" y1="40" x2="1240" y2="40" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+        <line x1="40" y1="180" x2="1240" y2="180" stroke="rgba(45,49,66,0.10)" stroke-width="1"/>
+        <line x1="40" y1="320" x2="1240" y2="320" stroke="rgba(45,49,66,0.10)" stroke-width="1"/>
+        <line x1="40" y1="460" x2="1240" y2="460" stroke="rgba(45,49,66,0.10)" stroke-width="1"/>
+        <line x1="40" y1="600" x2="1240" y2="600" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+        <line x1="200" y1="40" x2="200" y2="600" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+
+        <!-- Lane labels: cost rises upward -->
+        <text x="56" y="108" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">사람</text>
+        <text x="56" y="124" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">HUMAN GATE</text>
+        <text x="56" y="248" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">고가 실행기</text>
+        <text x="56" y="264" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">GPT-6.1-SOL HIGH</text>
+        <text x="56" y="388" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">저가 분류기</text>
+        <text x="56" y="404" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">GPT-6-LUNA</text>
+        <text x="56" y="528" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">스크립트</text>
+        <text x="56" y="544" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">NO MODEL</text>
+
+        <!-- Arrows (drawn before boxes) -->
+        <!-- a1 guard -> answered-by-me -->
+        <line x1="368" y1="530" x2="432" y2="530" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- a2 answered-by-me -> idle stop (lower right-edge attach) -->
+        <line x1="576" y1="540" x2="640" y2="540" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- a3 answered-by-me -> luna (shadow only) -->
+        <line x1="504" y1="502" x2="504" y2="418" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+        <!-- a4 answered-by-me -> Sol runner (upper right-edge attach) -->
+        <path d="M 576,520 H 600 Q 608,520 608,512 V 258 Q 608,250 616,250 H 640" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- a5 Sol runner -> verifiers -->
+        <path d="M 784,250 H 888 Q 896,250 896,258 V 502" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- a8 verifiers -> VPN/OTP (exit 10) -->
+        <line x1="944" y1="502" x2="944" y2="138" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+        <!-- a6 verifiers -> dev deploy / comment -->
+        <path d="M 992,530 H 1120 Q 1128,530 1128,522 V 278" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- a7 dev deploy -> stg approval -->
+        <line x1="1128" y1="222" x2="1128" y2="138" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- Arrow labels -->
+        <rect x="592" y="548" width="32" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="608" y="557" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">IDLE</text>
+
+        <rect x="512" y="454" width="44" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="534" y="463" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">SHADOW</text>
+
+        <rect x="616" y="376" width="68" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="650" y="388" fill="#4f5d75" font-size="12" font-weight="500" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">새 댓글·큐</text>
+
+        <rect x="856" y="376" width="32" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="872" y="388" fill="#4f5d75" font-size="12" font-weight="500" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">검증</text>
+
+        <rect x="952" y="294" width="48" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="976" y="303" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">EXIT 10</text>
+
+        <rect x="1136" y="394" width="36" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="1154" y="403" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">PASS</text>
+
+        <rect x="1136" y="172" width="60" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="1166" y="184" fill="#4f5d75" font-size="12" font-weight="500" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">stg 대기</text>
+
+        <!-- Steps: script lane -->
+        <rect x="224" y="502" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="296" y="526" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">Paseo tick · 가드</text>
+        <text x="296" y="542" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">jira-daily-guard</text>
+
+        <rect x="432" y="502" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="504" y="526" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">이미 답한 댓글</text>
+        <text x="504" y="542" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">answeredByMeAfter</text>
+
+        <rect x="640" y="502" width="144" height="56" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <text x="712" y="526" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">idle 종료</text>
+        <text x="712" y="542" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">skipping duplicate</text>
+
+        <rect x="848" y="502" width="144" height="56" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <text x="920" y="526" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">결정적 검증기</text>
+        <text x="920" y="542" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">preflight·base·deploy</text>
+
+        <!-- Steps: luna lane -->
+        <rect x="432" y="362" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="504" y="386" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">댓글 분류</text>
+        <text x="504" y="402" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">1 call/comment · jsonl</text>
+
+        <!-- Steps: Sol lane -->
+        <rect x="640" y="222" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="712" y="246" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">의도 판정·수정</text>
+        <text x="712" y="262" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">RUNBOOK §7 · sdlc-kit</text>
+
+        <rect x="1056" y="222" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="1128" y="246" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">dev 배포·댓글</text>
+        <text x="1128" y="262" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">jk · acli · check_adf</text>
+
+        <!-- Steps: human lane -->
+        <rect x="872" y="82" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="944" y="106" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">VPN 전환·OTP</text>
+        <text x="944" y="122" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">waiting=env-human</text>
+
+        <rect x="1056" y="82" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="1128" y="106" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" text-anchor="middle">stg 승인</text>
+        <text x="1128" y="122" fill="#4f5d75" font-size="8.5" font-family="'Geist Mono', monospace" text-anchor="middle">jira-followup-approve</text>
+
+        <!-- Legend -->
+        <line x1="40" y1="628" x2="1240" y2="628" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <text x="40" y="648" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.18em">LEGEND</text>
+
+        <rect x="40" y="664" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="60" y="673" fill="#4f5d75" font-size="12" font-weight="500" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">단계</text>
+
+        <rect x="120" y="664" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <text x="140" y="673" fill="#4f5d75" font-size="12" font-weight="500" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">비용·완료를 정하는 지점</text>
+
+        <rect x="340" y="664" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="360" y="673" fill="#4f5d75" font-size="12" font-weight="500" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">기록만(흐름에 영향 없음)</text>
+
+        <line x1="568" y1="669" x2="596" y2="669" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <text x="604" y="673" fill="#4f5d75" font-size="12" font-weight="500" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">흐름</text>
+
+        <line x1="664" y1="669" x2="692" y2="669" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+        <text x="700" y="673" fill="#4f5d75" font-size="12" font-weight="500" font-family="'Geist', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif">기록·예외 경로</text>
+      </svg>
+    </div>
+
+    <ul class="notes">
+      <li>위 레인일수록 비싸다. 아래에서 끝낼 수 있으면 위로 올라가지 않는다. 초기 측정에서 tick 대부분이 <code>idle 종료</code> 대상이었다.</li>
+      <li>그림에서 뺀 것: 아침 점검(§1~§6), 운영 금지 경계(<code>main</code>·운영 DB·태그). 정본은 <code>RUNBOOK.md</code> §0이다.</li>
+    </ul>
+
+    <h2>이 라인이 하는 일</h2>
+    <p class="lead"><b>실행 구조:</b> luna가 30분마다 깨우고, 할 일이 있을 때만 Opus high 반장(오케스트레이터)이 출근해 작업자에게 지시하고 전체 상황을 보고한다. 반장은 직접 고치지 않는다.<br>내 Jira 티켓에 달린 댓글을 평일 30분마다 읽는다. 답할 것은 답하고, 고칠 것은 로컬에서 재현해 고친 뒤 dev에 배포하고 증거 댓글을 남긴다. 그날 첫 실행은 내 담당 티켓 전체를 점검해 보고서와 상태 이동을 만든다. 사람은 stg 승인과 VPN 전환만 한다.</p>
+
+    <h2>역할</h2>
+    <table class="roles">
+      <thead><tr><th>공장 비유</th><th>구성요소</th><th>하는 일</th><th>누가</th></tr></thead>
+      <tbody>
+        <tr><td>시계·깨우미</td><td><code>스케줄러(예: Paseo)</code> → <code>jira-daily-wake</code></td><td>예: 평일 09:00~18:30, 30분마다 luna가 wake 명령 하나만 실행한다. 할 일이 있을 때만 반장을 띄운다</td><td><span class="tag">luna low</span></td></tr>
+        <tr><td>반장</td><td><code>ORCHESTRATOR.md</code></td><td>작업 단위를 정하고 <code>jira-worker</code>로 맡긴다. 검증 JSON을 확인하고 일지·마지막 줄·개발자 노트 보드로 전체 상황을 보고한 뒤 잠금을 푼다. 코드·git·Jenkins·Jira 쓰기는 하지 않는다</td><td><span class="tag acc">Opus high</span></td></tr>
+        <tr><td>출입문</td><td><code>jira-daily-guard</code></td><td>중복 실행과 실행 중 잠금을 확인하고 아침/수시 모드를 정한다. 할 일이 없으면 여기서 바로 끝낸다</td><td><span class="tag acc">스크립트</span></td></tr>
+        <tr><td>접수 창구</td><td><code>followup_scan.py</code></td><td>최근 72시간 동안 나를 멘션했거나 내 티켓에 달린 새 댓글을 뽑는다</td><td><span class="tag">스크립트</span></td></tr>
+        <tr><td>분류원</td><td><code>followup_triage.py</code></td><td>이미 내가 답한 댓글은 바로 처리 완료로 기록한다. 나머지는 luna가 "응답 필요?"를 판정해 기록만 한다(섀도)</td><td><span class="tag">스크립트</span> <span class="tag">luna</span></td></tr>
+        <tr><td>작업자</td><td><code>jira-worker</code> + <code>RUNBOOK</code> + sdlc-kit</td><td>의도 판정(명확도 90%) → 로컬 AS-IS 재현 → <code>fix/&lt;KEY&gt;</code> 수정·테스트·리뷰 → TO-BE 재현 → <code>dev</code> 병합·Jenkins 배포 → Jira 증거 댓글·상태 이동</td><td><span class="tag">Sol high</span> <span class="tag">Opus medium</span></td></tr>
+        <tr><td>검사원</td><td><code>preflight_env</code> · <code>check_base</code> · <code>check_deploy</code> · <code>check_adf</code></td><td>환경 준비(VPN·DB·AI 엔진), 브랜치에 다른 티켓이 섞였는지, 배포된 커밋이 맞는지, 댓글이 실제로 게시됐는지를 exit 코드로 판정한다. FAIL이면 "완료"라고 쓸 수 없다</td><td><span class="tag acc">스크립트</span></td></tr>
+        <tr><td>대기 선반</td><td><code>followup-queue.json</code></td><td>멈춘 티켓과 이유를 보관한다: <code>reporter</code>(요청자 답 대기), <code>human-risk</code>(위험·충돌), <code>stg-approval</code>, <code>env-human</code>/<code>env-down</code></td><td><span class="tag">파일</span></td></tr>
+        <tr><td>출하 승인</td><td><code>jira-followup-approve</code>, VPN 창</td><td>스테이징(stg) 배포 승인, 스테이징 VPN 전환과 OTP 입력</td><td><span class="tag">사람</span></td></tr>
+        <tr><td>작업 일지</td><td><code>followup-YYYY-MM-DD.md</code>, 개발자 노트 보드</td><td>이벤트마다 한 줄 기록, 아침 점검 보고서</td><td><span class="tag">파일</span></td></tr>
+      </tbody>
+    </table>
+
+    <h2>한 번 돌 때</h2>
+    <p class="case">경우 1 · 할 일 없음 (실측 예)</p>
+    <ol class="steps">
+      <li>가드가 스캔했다: 새 댓글 0건, 큐 3건은 모두 대기 중, 미사용 승인 없음.</li>
+      <li>일지에 <code>idle-skip(guard)</code> 한 줄을 남기고 종료했다. Sol은 명령 하나만 실행하고 멈췄다(RUNBOOK을 읽지 않음).</li>
+    </ol>
+    <p class="case">경우 2 · 고칠 일이 있는 댓글</p>
+    <ol class="steps">
+      <li>스캔이 댓글을 찾는다. 이미 내가 답한 댓글이면 분류원이 처리하고 끝낸다.</li>
+      <li>Sol이 티켓 전체를 읽고 의도를 판정한다. 명확도가 90% 미만이면 고치지 않고, 질문 댓글을 쓰거나 초안만 남긴다(<code>waiting=reporter</code>).</li>
+      <li>검사원 <code>preflight_env</code>: 필요한 환경이 없으면 시작하지 않는다. VPN 전환은 사람에게 알리고 <code>env-human</code>으로 대기한다.</li>
+      <li>로컬에서 증상을 그대로 재현한다(AS-IS). 재현되지 않으면 고치지 않는다.</li>
+      <li><code>fix/&lt;KEY&gt;</code>에서 고치고, 실패→통과 테스트와 별도 리뷰어를 돌린다. push 전에 <code>check_base</code>를 통과해야 한다.</li>
+      <li>같은 계정·데이터로 다시 재현해 증상이 사라졌는지 본다(TO-BE).</li>
+      <li><code>dev</code>에 병합하고 Jenkins dev에 배포한다. 배포 완료는 <code>check_deploy</code>가 PASS일 때만 기록한다.</li>
+      <li>Jira에 증거 댓글을 남기고, 되읽어 확인한 뒤 상태를 "개발 QA 요청"으로 옮긴다.</li>
+      <li>검수 완료 댓글이 오면 stg 병합만 준비하고 사람의 승인을 기다린다. 승인이 들어오면 다음 실행이 stg에 배포한다.</li>
+    </ol>
+
+    <h2>소프트웨어 팩토리 기준으로 보면</h2>
+    <table class="roles">
+      <thead><tr><th>기준</th><th>지금</th><th>근거 (초기 측정)</th></tr></thead>
+      <tbody>
+        <tr><td>입력 자동 접수</td><td>부분</td><td>멘션·담당 티켓 댓글과 백로그 상태의 내 티켓(백로그 접수)을 입력으로 받는다</td></tr>
+        <tr><td>자동 제작</td><td>있음</td><td>§7-3의 재현 → 수정 → 테스트 → dev 배포 → 증거 댓글</td></tr>
+        <tr><td>자동 품질 판정</td><td>부분</td><td>결정적 검증기가 있다. 코드 리뷰는 아직 모델 판정이다</td></tr>
+        <tr><td>사람은 승인만</td><td>부분</td><td>진행 중 항목의 상당수가 evidence 단계에서 사람을 기다린다(시험 데이터·환경 부족)</td></tr>
+        <tr><td>처리량</td><td>낮음</td><td>실행 한 번에 티켓을 하나씩 직렬로 처리한다(순차 drain)</td></tr>
+        <tr><td>비용 계층</td><td>시작</td><td>idle 차단과 luna 섀도까지 했다. 작업자 등급은 아직 Sol 하나뿐이다</td></tr>
+        <tr><td>자기 개선</td><td>없음</td><td>주간 회고(RETRO.md)가 개선안을 브랜치로 제안하고 병합은 사람이 한다</td></tr>
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>

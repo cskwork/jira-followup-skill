@@ -1,0 +1,24 @@
+#!/bin/bash
+# 사람 결정 페이지를 백그라운드로 띄우고 기본 브라우저로 연다 (decision_page.py).
+# Usage: decision-request stg-approval <KEY>
+#        decision-request spec <spec.json>
+# 오케스트레이터는 사람 결정이 필요할 때마다 이것을 부른다(ORCHESTRATOR §5). 버튼 클릭 = 결정.
+set -u
+: "${JIRA_FOLLOWUP_HOME:=$HOME/.jira-followup}"
+mode=${1:-} target=${2:-}
+case "$mode" in
+  stg-approval) [[ "$target" =~ ^[A-Za-z][A-Za-z0-9]+-[0-9]+$ ]] || { echo "usage: decision-request stg-approval <KEY>" >&2; exit 2; }
+                name=$(printf '%s' "$target" | tr '[:lower:]' '[:upper:]')-stg ;;
+  spec) [ -f "$target" ] || { echo "usage: decision-request spec <spec.json>" >&2; exit 2; }
+        name=$(basename "$target" .json) ;;
+  *) echo "usage: decision-request stg-approval <KEY> | spec <spec.json>" >&2; exit 2 ;;
+esac
+here=$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().parent)' "$0")
+dir="${JIRA_WAKE_DIR:-$JIRA_FOLLOWUP_HOME}/decision-pages"
+mkdir -p "$dir"
+url_file="$dir/$name.url"
+: > "$url_file"
+nohup python3 "$here/decision_page.py" "$mode" "$target" --open --url-file "$url_file" >> "$dir/$name.log" 2>&1 &
+for _ in $(seq 1 90); do [ -s "$url_file" ] && break; sleep 1; done
+[ -s "$url_file" ] || { echo "decision-request: page did not start (see $dir/$name.log)"; exit 1; }
+echo "decision-request: opened $mode page for $name"

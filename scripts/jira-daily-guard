@@ -1,0 +1,5 @@
+#!/bin/bash
+# 실행 잠금·생존 판정은 상태 폴더의 토큰을 기준으로 직렬화한다.
+set -u
+here=$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().parent)' "$0")
+exec python3 "$here/run_lock.py" guard "$@"

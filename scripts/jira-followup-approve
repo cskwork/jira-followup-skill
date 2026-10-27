@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""스테이징(stg) 배포 승인 기록: jira-followup-approve <KEY> stg "<승인 문구>"
+스케줄(RUNBOOK §7-3-6)은 이 파일의 미사용 승인만 stg push·배포 근거로 인정한다."""
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import followup_config as cfg  # noqa: E402
+from state_update import patch  # noqa: E402
+
+if len(sys.argv) != 4 or sys.argv[2] != 'stg' or not sys.argv[3].strip():
+    sys.exit('usage: jira-followup-approve <KEY> stg "<승인 문구>"')
+key = sys.argv[1].upper()
+directory = Path(os.environ.get('JIRA_WAKE_DIR') or cfg.HOME_DIR)
+data = patch(directory, 'approvals.json', [], {
+    key: {'stg': sys.argv[3].strip(), 'at': datetime.now(cfg.TZ).isoformat()}})
+print(f'approved {key} stg at {data[key]["at"]}')

@@ -1,0 +1,71 @@
+{
+  "source": "followup-queue.bak-20261023-0815.json",
+  "sha256": "8ce9520e607ed1324b25796087a6af11657be3772838464a357e7c79145460ab",
+  "eligibleAfterPreflight": [
+    "PROJ-1389",
+    "PROJ-1404",
+    "PROJ-1379"
+  ],
+  "queue": {
+    "PROJ-1353": {
+      "stage": "intent",
+      "commentIds": [
+        "49599"
+      ],
+      "waiting": "reporter"
+    },
+    "PROJ-1334": {
+      "stage": "intent",
+      "commentIds": [
+        "49607"
+      ],
+      "waiting": "human-risk",
+      "createdAt": "2026-10-19T13:33:16.053481+09:00"
+    },
+    "PROJ-1348": {
+      "stage": "stg-prepare",
+      "commentIds": [
+        "49610",
+        "49732"
+      ],
+      "waiting": "human-risk",
+      "createdAt": "2026-10-19T14:03:38.115148+09:00"
+    },
+    "PROJ-1389": {
+      "stage": "tobe",
+      "commentIds": [
+        "49693",
+        "49706",
+        "49708",
+        "49722",
+        "49723",
+        "49730",
+        "49748"
+      ],
+      "waiting": "env-human"
+    },
+    "PROJ-1405": {
+      "stage": "intent",
+      "commentIds": [
+        "intake:PROJ-1405"
+      ],
+      "waiting": "human-risk"
+    },
+    "PROJ-1404": {
+      "stage": "intent",
+      "commentIds": [
+        "intake:PROJ-1404"
+      ],
+      "waiting": "env-human",
+      "createdAt": "2026-10-21T18:41:32+09:00"
+    },
+    "PROJ-1379": {
+      "stage": "intent",
+      "commentIds": [
+        "intake:PROJ-1379"
+      ],
+      "waiting": "env-human",
+      "createdAt": "2026-10-21T18:43:25+09:00"
+    }
+  }
+}

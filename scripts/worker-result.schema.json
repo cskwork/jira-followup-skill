@@ -1,0 +1,79 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "key",
+    "stage",
+    "waiting",
+    "artifacts",
+    "checks"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "done",
+        "waiting",
+        "failed"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "description": "한국어 1~3문장: 무엇을 했고 결과가 무엇인지"
+    },
+    "key": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "PROJ-NNNN 또는 null"
+    },
+    "stage": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "도달한 단계(예: asis, build, tobe, dev-deployed, commented, stg-ready)"
+    },
+    "waiting": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "대기 이유: reporter | human-risk | stg-approval | env-human | env-down, 없으면 null"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "증적·검증 JSON 경로"
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "result"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL",
+              "SKIP"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

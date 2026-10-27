@@ -1,0 +1,25 @@
+# Local settings and runtime state never belong in git
+config.env
+*.env
+!config.example.env
+state.json
+followup-queue.json
+approvals.json
+decisions.jsonl
+lessons.jsonl
+triage-shadow.jsonl
+teams-*.json
+teams-drafts/
+decision-pages/
+runs/
+logs/
+*.token
+.env*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS
+.DS_Store
