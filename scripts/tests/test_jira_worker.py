@@ -86,6 +86,14 @@ class WorkerSectionChecks(unittest.TestCase):
             self.assertIn(f"morning-{number}-body", self.prompt())
         self.assertNotIn("ticket-body", self.prompt())
 
+    def test_dashed_step_range_keeps_prefix(self):
+        for citation in ("§7-3-4~5", "§7-3-1~§7-3-3"):
+            with self.subTest(citation=citation):
+                result = self.worker(f"RUNBOOK {citation}\n")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("ticket-body", self.prompt())
+                self.assertNotIn("other-body", self.prompt())
+
     def test_explicit_orchestrator_reference_uses_that_document(self):
         result = self.worker("RUNBOOK §7-3; `ORCHESTRATOR.md` §2\n")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -150,7 +158,7 @@ class WorkerSectionChecks(unittest.TestCase):
         self.assertFalse(self.capture.exists())
 
     def test_invalid_range_prevents_launch(self):
-        for citation in ("§6~§1", "§0~§999999999"):
+        for citation in ("§6~§1", "§0~§999999999", "§7-3-5~4"):
             with self.subTest(citation=citation):
                 result = self.worker(f"RUNBOOK {citation}\n")
                 self.assertNotEqual(result.returncode, 0)

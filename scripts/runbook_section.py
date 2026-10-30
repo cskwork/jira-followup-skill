@@ -59,10 +59,14 @@ def cited_sections(brief):
         for match in CITATION.finditer(line):
             document = match[1] or document
             start, end = match[2], match[3]
+            # §7-3-4~5 and §7-3-4~§7-3-5 both keep the shared prefix.
+            prefix, _, first = start.rpartition("-")
+            last = end[len(prefix) + 1:] if end and prefix and end.startswith(prefix + "-") else end
             if end is None:
                 requested[document].append(start)
-            elif start.isdecimal() and end.isdecimal() and int(start) <= int(end) <= int(start) + 100:
-                requested[document].extend(str(number) for number in range(int(start), int(end) + 1))
+            elif first.isdecimal() and last.isdecimal() and int(first) <= int(last) <= int(first) + 100:
+                requested[document].extend(f"{prefix}-{number}" if prefix else str(number)
+                                           for number in range(int(first), int(last) + 1))
             else:
                 raise ValueError(f"unsupported section range §{start}~§{end}")
     return requested

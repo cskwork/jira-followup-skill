@@ -202,7 +202,8 @@ class DrainTest(unittest.TestCase):
         updated = json.loads((self.directory/'followup-queue.json').read_text())['PROJ-1']
         self.assertEqual(updated['backoffUntil'], item['backoffUntil'])
         self.assertEqual(updated['backoffLevel'], item['backoffLevel'])
-        for text in ('rate limit', 'RATE-LIMIT', 'overloaded', 'HTTP 429'):
+        for text in ('rate limit', 'RATE-LIMIT', 'overloaded', 'HTTP 429',
+                     'Selected model is at capacity'):
             result.write_text(text)
             self.assertTrue(drain.rate_limited(result))
         result.write_text('PROJ-1429 passed')

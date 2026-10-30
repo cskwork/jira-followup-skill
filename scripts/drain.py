@@ -210,7 +210,7 @@ def update_item(directory, token, key, action, now, reason=None):
 def rate_limited(*paths):
     text = '\n'.join(Path(path).read_text(encoding='utf-8', errors='replace')
                      for path in paths if path is not None)
-    return bool(re.search(r'rate[ -]?limit|\b429\b|\boverloaded\b', text, re.I))
+    return bool(re.search(r'rate[ -]?limit|\b429\b|\boverloaded\b|\bat capacity\b', text, re.I))
 
 
 def main(argv=None):
