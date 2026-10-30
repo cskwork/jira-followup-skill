@@ -112,7 +112,7 @@ python3 "$S/state_update.py" --dir "$D" consume-pending --lines '["<처리한 �
 ## 4. 결과 확인 (판정은 스크립트)
 
 - 먼저 `python3 $S/drain.py --dir <state_dir> --token <run_token> check-result --key <KEY> --result <결과 JSON> --stderr <저장한 stderr>`를 실행한다. 결과·stderr의 `rate limit`·`rate-limit`·`429`·`overloaded`를 찾으면 `failureType=infra`, `retryAllowed=false`를 반환하고 `deferReason=rate-limit`과 항목별 backoff를 기록한다(30분 × 2^level, 최대 2시간). 이 실패는 **재시도하지 않는다**. 만료 전에는 해당 항목만 runnable·stuck에서 제외한다. 다른 항목·새 이벤트·pending focus는 계속 처리한다. 키 없는 아침 단위의 요금 제한은 infra 교훈만 남기며 큐 항목을 만들지 않는다.
-- 작업자가 `status=done`이라고 해도, brief가 요구한 검증 JSON이 `artifacts`에 없거나 그 JSON이 FAIL이면 done으로 기록하지 않는다. 큐를 `waiting=human-risk`로 두고 note에 이유를 쓴다.
+- 작업자가 `status=done`이라고 해도, brief가 요구한 검증 JSON이 `artifacts`에 없거나 그 JSON이 FAIL이면 done으로 기록하지 않는다. 작업자가 VPN·DB 등 환경 대기(`env-human`·`env-down`)로 멈췄다고 보고했으면 그 대기를 유지하고, 막힌 다음 동작의 `nextStep`·`needs`를 저장한다. 가드는 `env-human`·`env-down`만 점검·알림하므로 `human-risk`로 덮으면 VPN 연결 요청이 나가지 않는다. 그 밖은 큐를 `waiting=human-risk`로 두고 note에 이유를 쓴다.
 - 의심되면 같은 검증 스크립트를 읽기 전용으로 다시 돌린다. `check_base.py`, `check_deploy.py`(jk가 약 60초 걸린다), `check_adf.py`.
 - 그 밖의 작업자 실패(`status=failed` 또는 종료 코드 ≠ 0)는 같은 단위를 같은 작업자에게 **한 번만** 다시 맡긴다. 재시도도 소유권·마감 예산을 확인한다. 두 번째도 실패하면 `waiting=human-risk`로 두고 알린다. 다른 모델로 바꾸지 않는다.
 

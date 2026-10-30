@@ -279,7 +279,9 @@ def todo_actions(settled, queue):
         waiting = item.get('waiting')
         current = row.get('waiting') or ''
         if waiting:
-            note = ' '.join(str(item.get('note') or '').split())[:200]
+            # The note appends new records after ' | '; its first 200 chars are the oldest record,
+            # so mirror the latest segment or the to-do board never shows a newer wait.
+            note = ' '.join(str(item.get('note') or '').split(' | ')[-1].split())[:200]
             text = f'{WAIT_PREFIX}{waiting}' + (f': {note}' if note else '')
             if current != text or row.get('unread'):
                 actions.append(['wait', row['id'], text])

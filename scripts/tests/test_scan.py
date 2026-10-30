@@ -209,6 +209,10 @@ class SelectTodoTest(unittest.TestCase):
         self.assertEqual(todo_actions([(mirrored, 'PROJ-1348')], cleared), [['resume', '0e801e', '공장 큐 대기 해제']])
         self.assertEqual(todo_actions([(dict(ready, waiting='which project?'), 'PROJ-1348')], {}), [])
         self.assertEqual(todo_actions([(dict(ready, unread=1), 'PROJ-1348')], {}), [['take', '0e801e', '--json']])
+        # The newest appended record must reach the board, not the first one.
+        appended = {'PROJ-1348': {'waiting': 'human-risk', 'note': '2026-10-19 첫 기록 | 2026-10-27 최신 기록'}}
+        self.assertEqual(todo_actions([(mirrored, 'PROJ-1348')], appended),
+                         [['wait', '0e801e', '공장 대기 — human-risk: 2026-10-27 최신 기록']])
 
     def test_main_mirrors_queue_and_todo_failure_keeps_jira_scan(self):
         row = dict(todo_row(), waiting='', unread=0)
