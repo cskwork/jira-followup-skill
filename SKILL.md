@@ -7,7 +7,7 @@ description: Jira 자동 follow-up 단일 스케줄(예: 평일 08:00~18:30, 30�
 
 스케줄 1개가 이 폴더의 `RUNBOOK.md`를 그대로 따른다. 규칙을 바꿀 때는 `RUNBOOK.md`만 고친다. 명령은 `~/.local/bin`의 심링크로 이 폴더의 스크립트를 가리킨다.
 
-구조도: [`docs/architecture.html`](docs/architecture.html). 판정은 싼 순서로 한다. 스크립트(모델 없음) → `gpt-6-luna`(깨우기·섀도 분류) → 할 일이 있을 때만 `claude-opus-5-5` high 상위 오케스트레이터(`ORCHESTRATOR.md`, 배분·보고만) → 키마다 티켓 오케스트레이터(`TICKET-ORCHESTRATOR.md`, opus high, 최대 `lanes`개 동시) → 작업자(`gpt-6.1-sol` high / `claude-opus-5-5` medium) → 사람(VPN OTP·stg 승인) 순서다. 위험이 낮은 사람 결정은 판정 에이전트(judge)가 먼저 본다. 모델은 모두 `config.env`로 바꿀 수 있는 기본값이다. 완료는 결정적 검증기가 판정한다.
+구조도: [`docs/architecture.html`](docs/architecture.html). 판정은 싼 순서로 한다. 스크립트(모델 없음) → `gpt-6-luna`(깨우기·섀도 분류) → 할 일이 있을 때만 `claude-opus-5-5` high 상위 오케스트레이터(`ORCHESTRATOR.md`, 배분·보고만) → 키마다 티켓 오케스트레이터(`TICKET-ORCHESTRATOR.md`, opus high, 최대 `lanes`개 동시) → 작업자(`gpt-6.2-sol` high / `claude-opus-5-5` medium) → 사람(VPN OTP·stg 승인) 순서다. 위험이 낮은 사람 결정은 판정 에이전트(judge)가 먼저 본다. 모델은 모두 `config.env`로 바꿀 수 있는 기본값이다. 완료는 결정적 검증기가 판정한다.
 
 감시 상태·실행 checkpoint·호출자 필수 검증·실측 summary 계약: [런타임 설명](docs/retrospective-runtime.md).
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # 오케스트레이터가 작업 한 단위를 맡기는 명령. 완료까지 기다리고 결과 JSON을 stdout에 낸다.
 # Usage: jira-worker <sol|opus> <title> <brief-file> [timeout, default 90m] [--token TOKEN] [--key KEY] [--dir PATH] [--requirements FILE] [--resources a,b]
-#   sol  = codex 작업자(기본 gpt-6.1-sol high, full-access): 아침 점검, 백엔드 수정·배포, API·DB QA
+#   sol  = codex 작업자(기본 gpt-6.2-sol high, full-access): 아침 점검, 백엔드 수정·배포, API·DB QA
 #   opus = claude 작업자(기본 claude-opus-5-5 medium, bypassPermissions): 프론트 수정, Jira 답변·댓글 문구, 브라우저 QA
 # 모델은 config.env의 WORKER_SOL_*·WORKER_OPUS_*(PROVIDER·MODEL·THINKING·MODE)로 바꾼다.
 # Exit: paseo 종료 코드. 2 = 잘못된 사용·선언 오류(brief 절·requirements·자원 이름, 잠금 전), 3 = 토큰 불일치·키 차단·일시정지(hold.json), 4 = 자원·예산 부족.
@@ -46,7 +46,7 @@ if [ -n "$key" ] && ! [[ "$key" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]; then
 fi
 min_env=()
 case "$role" in
-  sol)  target=(--provider "${WORKER_SOL_PROVIDER:-codex}" --model "${WORKER_SOL_MODEL:-gpt-6.1-sol}"
+  sol)  target=(--provider "${WORKER_SOL_PROVIDER:-codex}" --model "${WORKER_SOL_MODEL:-gpt-6.2-sol}"
                --thinking "${WORKER_SOL_THINKING:-high}" --mode "${WORKER_SOL_MODE:-full-access}") ;;
   opus) target=(--provider "${WORKER_OPUS_PROVIDER:-claude}" --model "${WORKER_OPUS_MODEL:-claude-opus-5-5}"
                --thinking "${WORKER_OPUS_THINKING:-medium}" --mode "${WORKER_OPUS_MODE:-bypassPermissions}")

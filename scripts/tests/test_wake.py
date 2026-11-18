@@ -273,7 +273,7 @@ class WorkerChecks(StubFixture):
         return str(path)
 
     def test_roles_map_to_rules_md_models(self):
-        expected = {"sol": ("codex", "gpt-6.1-sol", "high", "full-access"),
+        expected = {"sol": ("codex", "gpt-6.2-sol", "high", "full-access"),
                     "opus": ("claude", "claude-opus-5-5", "medium", "bypassPermissions")}
         for role, (provider, model, thinking, mode) in expected.items():
             self.calls.unlink(missing_ok=True)

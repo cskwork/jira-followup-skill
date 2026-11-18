@@ -4,7 +4,7 @@
 
 ## 0. 모드
 
-실행 구조: 스케줄러(예: Paseo 스케줄, 싼 깨우기 모델 `gpt-6-luna`)는 `jira-daily-wake`만 실행한다. 가드가 할 일이 있다고 판정할 때만 `claude-opus-5-5` high 상위 오케스트레이터가 뜬다(모델은 `ORCHESTRATOR_*` 설정). 상위 오케스트레이터(`ORCHESTRATOR.md`)는 키를 배분하고, 키마다 티켓 오케스트레이터(`TICKET-ORCHESTRATOR.md`)가 이 RUNBOOK의 절을 작업자(`jira-worker`: gpt-6.1-sol high 또는 claude-opus-5-5 medium)에게 단위별로 맡기고 결과 확인과 보고만 한다. 아래 절차는 작업자가 맡은 절을 수행하는 방법이다.
+실행 구조: 스케줄러(예: Paseo 스케줄, 싼 깨우기 모델 `gpt-6-luna`)는 `jira-daily-wake`만 실행한다. 가드가 할 일이 있다고 판정할 때만 `claude-opus-5-5` high 상위 오케스트레이터가 뜬다(모델은 `ORCHESTRATOR_*` 설정). 상위 오케스트레이터(`ORCHESTRATOR.md`)는 키를 배분하고, 키마다 티켓 오케스트레이터(`TICKET-ORCHESTRATOR.md`)가 이 RUNBOOK의 절을 작업자(`jira-worker`: gpt-6.2-sol high 또는 claude-opus-5-5 medium)에게 단위별로 맡기고 결과 확인과 보고만 한다. 아래 절차는 작업자가 맡은 절을 수행하는 방법이다.
 
 가드 출력의 `mode=` 줄을 따른다.
 - `mode=morning` (오늘 첫 성공 전): §1~§6 다음 §7.
