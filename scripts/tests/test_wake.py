@@ -11,6 +11,8 @@ import subprocess
 import tempfile
 import unittest
 
+from _harness import bound  # noqa: E402  부하에 맞춘 하위 프로세스 한도
+
 ROOT = Path(__file__).resolve().parents[1]
 WAKE = ROOT / "jira-daily-wake"
 WORKER = ROOT / "jira-worker"
@@ -29,7 +31,8 @@ class StubFixture(unittest.TestCase):
                         'if [ "$1" = agent ] && [ "${2:-}" = ls ]; then echo "[]"; exit 0; fi\n'
                         'echo fake-agent-id\nexit "${PASEO_RC:-0}"\n')
         self.env = dict(os.environ, HOME=str(self.dir), JIRA_WAKE_FOREGROUND="1", PATH=f"{self.bin}:{os.environ['PATH']}", CALLS=str(self.calls),
-                        JIRA_WAKE_CWD=str(self.dir), JIRA_WORKER_CWD=str(self.dir))
+                        JIRA_WAKE_CWD=str(self.dir), JIRA_WORKER_CWD=str(self.dir),
+                        JIRA_FACTORY_WORKSPACE="wks_factory")
 
         state = self.dir / ".jira-followup"
         (state / "runs/finished").mkdir(parents=True)
@@ -59,7 +62,7 @@ class WakeChecks(StubFixture):
 
     def wake(self, **extra):
         env = dict(self.env, **extra)
-        return subprocess.run(["/bin/bash", str(WAKE)], env=env, capture_output=True, text=True, timeout=20)
+        return subprocess.run(["/bin/bash", str(WAKE)], env=env, capture_output=True, text=True, timeout=bound(20))
 
     def test_idle_or_duplicate_launches_nothing(self):
         released = self.guard("jira-daily-guard: skipping duplicate (idle: events=0, no runnable work)")
@@ -82,9 +85,23 @@ class WakeChecks(StubFixture):
         for flag, value in (("--provider", "claude"), ("--model", "claude-opus-5-5"),
                             ("--thinking", "high"), ("--mode", "bypassPermissions")):
             self.assertEqual(argv[argv.index(flag) + 1], value)
+        self.assertEqual(argv[argv.index("--workspace") + 1], "wks_factory")
         self.assertIn("mode=tick", argv[-1])
         self.assertIn("ORCHESTRATOR.md", argv[-1])
         self.assertFalse(released.exists())  # orchestrator owns the lock now
+
+    def test_orchestrator_gets_min_env_and_off_switch_restores_old_command(self):
+        min_env = ["CLAUDE_CODE_DISABLE_AUTO_MEMORY=1", "HINDSIGHT_DISABLE_HOOKS=1", "TE_MICROSKILLS=off"]
+        self.guard("run\\nmode=tick")
+        response = self.wake()
+        self.assertEqual(response.returncode, 0, response.stdout + response.stderr)
+        argv = self.paseo_calls()[-1]
+        self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == "--env"], min_env)
+        (self.dir / ".jira-followup/min-env").write_text("off\n")
+        self.calls.unlink()
+        response = self.wake()
+        self.assertEqual(response.returncode, 0, response.stdout + response.stderr)
+        self.assertNotIn("--env", self.paseo_calls()[-1])
 
     def test_orchestrator_is_not_a_child_of_the_schedule_agent(self):
         # Paseo archives a finished schedule run agent and cascades the archive to
@@ -100,7 +117,7 @@ class WakeChecks(StubFixture):
         self.write_exec(guard, f'#!/bin/bash\nprintf "%s\\n" "$@" > "{seen}"\nprintf "manual run\\nmode=tick\\n"\n')
         self.env["JIRA_WAKE_GUARD"] = str(guard)
         response = subprocess.run(["/bin/bash", str(WAKE), "--now", "--key", "PROJ-1389"], env=self.env,
-                                  capture_output=True, text=True, timeout=20)
+                                  capture_output=True, text=True, timeout=bound(20))
         self.assertEqual(response.returncode, 0, response.stdout + response.stderr)
         self.assertEqual(seen.read_text().split(), ["--manual"])
         calls = self.paseo_calls()
@@ -113,7 +130,7 @@ class WakeChecks(StubFixture):
         self.guard("run\\nmode=tick")
         for args in (["--key", "PROJ-1389"], ["--now", "--key", "1389"], ["--bogus"]):
             response = subprocess.run(["/bin/bash", str(WAKE), *args], env=self.env,
-                                      capture_output=True, text=True, timeout=20)
+                                      capture_output=True, text=True, timeout=bound(20))
             self.assertEqual(response.returncode, 2, args)
         self.assertEqual(self.paseo_calls(), [])
 
@@ -248,7 +265,7 @@ class WorkerChecks(StubFixture):
         (state / ".running-fixture").write_text(json.dumps({"token": "fixture"}))
         os.replace(state / ".running-fixture", state / "running.json")
         return subprocess.run(["/bin/bash", str(WORKER), *args, "--token", "fixture"], env=self.env,
-                              capture_output=True, text=True, timeout=20)
+                              capture_output=True, text=True, timeout=bound(20))
 
     def brief(self):
         path = self.dir / "brief.md"

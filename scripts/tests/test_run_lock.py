@@ -1,5 +1,8 @@
 """단계 A 오프라인 계약. 모든 Paseo 조회·실행은 PATH 첫 스텁만 쓴다."""
 import importlib.util
+from contextlib import redirect_stderr
+import gzip
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +12,8 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+
+from _harness import bound  # 부하에 맞춘 하위 프로세스 한도
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -64,6 +69,19 @@ class LivenessFixture(unittest.TestCase):
         self.notification = self.root / "notifications"
         (self.bin / "paseo").write_text(STUB)
         (self.bin / "paseo").chmod(0o755)
+        # sandbox에서도 CLI 자식까지 같은 시작 시각 조회 스텁을 사용한다.
+        (self.bin / 'ps').write_text('''#!/usr/bin/env python3
+import os, sys
+pid = int(sys.argv[sys.argv.index('-p') + 1])
+try:
+    os.kill(pid, 0)
+except ProcessLookupError:
+    sys.exit(1)
+print('fixture-process-start-' + str(pid))
+''')
+        (self.bin / 'ps').chmod(0o755)
+        (self.bin / 'chat-cli').write_text('#!/bin/sh\nexit 1\n')
+        (self.bin / 'chat-cli').chmod(0o755)
         (self.bin / "osascript").write_text('#!/bin/sh\necho alert >> "$NOTIFICATIONS"\n')
         (self.bin / "osascript").chmod(0o755)
         self.settings = {}
@@ -71,7 +89,8 @@ class LivenessFixture(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.root), JIRA_WAKE_DIR=str(self.state),
                         JIRA_WORKER_CWD=str(self.root), JIRA_WAKE_CWD=str(self.root),
                         PATH=f"{self.bin}:{os.environ['PATH']}", PASEO_FIXTURE=str(self.config),
-                        PASEO_CALLS=str(self.calls), NOTIFICATIONS=str(self.notification))
+                        PASEO_CALLS=str(self.calls), NOTIFICATIONS=str(self.notification),
+                        TEAMS_NATIVE_CLI=str(self.bin / 'chat-cli'))
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, self.env).start()
 
@@ -97,7 +116,7 @@ class LivenessFixture(unittest.TestCase):
     def cli(self, script, *args):
         return subprocess.run([sys.executable if script.endswith('.py') else '/bin/bash',
                                str(SCRIPTS / script), *args], env=self.env,
-                              capture_output=True, text=True, timeout=15)
+                              capture_output=True, text=True, timeout=bound(15))
 
     def recorded(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
@@ -167,6 +186,90 @@ class ReleaseBySelf(LivenessFixture):
 
 
 class LivenessChecks(LivenessFixture):
+    def test_error_agents_are_nonrunning_and_keep_key_blocked_until_reconciled(self):
+        self.lost()
+        self.configure(agents=[self.row(status='error')])
+        self.assertEqual(LOCK.agents('old')[0]['status'], 'error')
+        self.assertFalse(LOCK.has_running(LOCK.agents('old')))
+        self.assertEqual(LOCK.blocked_by(self.state, 'PROJ-1'), ['old'])
+        self.assertEqual(LOCK.reconcile_reasons(self.state), ['reconcile:old'])
+        self.lock('new')
+        recovered = self.cli('run_lock.py', 'recover', '--token', 'old', '--current-token', 'new')
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertFalse(json.loads(recovered.stdout)['running'])
+        self.assertTrue((self.state / 'runs/old/worker.recovered.txt').exists())
+        self.assertFalse((self.state / 'runs/old/ended').exists())
+        response = self.cli('run_lock.py', 'reconciled', '--token', 'old', '--current-token', 'new')
+        self.assertEqual(response.returncode, 0, response.stderr)
+        self.assertEqual(LOCK.blocked_by(self.state, 'PROJ-1'), [])
+
+    def test_error_owner_reclaimed_only_without_running_sibling(self):
+        self.lock(noLiveSince=1)
+        self.configure(agents=[self.row(status='error')], inspect={'Archived': False, 'Status': 'error'})
+        self.assertFalse(self.busy())
+        self.assertTrue((self.state / 'runs/old/lost').exists())
+        self.lock(noLiveSince=1)
+        self.configure(agents=[self.row(status='error'), self.row('live', status='running')])
+        self.assertTrue(self.busy())
+        self.assertNotIn('noLiveSince', LOCK.read_lock(self.state))
+        self.assertEqual(LOCK.read_lock(self.state)['queryFailures'], 0)
+
+    def test_error_with_running_sibling_stays_blocked_and_recoverable(self):
+        self.lost()
+        self.lock('new')
+        self.configure(agents=[self.row(status='error'), self.row('live', status='running')])
+        self.assertEqual(LOCK.blocked_by(self.state, 'PROJ-1'), ['old'])
+        self.assertEqual(LOCK.reconcile_reasons(self.state), [])
+        recovered = self.cli('run_lock.py', 'recover', '--token', 'old', '--current-token', 'new')
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertTrue(json.loads(recovered.stdout)['running'])
+        self.assertTrue((self.state / 'runs/old/live.recovered.txt').exists())
+        response = self.cli('run_lock.py', 'reconciled', '--token', 'old', '--current-token', 'new')
+        self.assertEqual(response.returncode, 1, response.stderr)
+        self.assertFalse((self.state / 'runs/old/ended').exists())
+
+    def test_error_worker_release_and_archive_follow_ended_contract(self):
+        self.lock()
+        self.configure(agents=[self.row(status='error')])
+        response = self.cli('jira-daily-guard', '--release', '--token', 'old')
+        self.assertEqual(response.returncode, 0, response.stderr)
+        self.assertTrue((self.state / 'runs/old/ended').exists())
+        response = self.cli('run_lock.py', 'archive', '--dir', str(self.state))
+        self.assertEqual(response.returncode, 0, response.stderr)
+        self.assertIn('archived=1 archive_failed=0', response.stdout)
+
+    def test_unknown_agent_status_still_fails_closed(self):
+        self.lost()
+        self.lock()
+        self.configure(agents=[self.row(status='unknown')])
+        with self.assertRaises(ValueError):
+            LOCK.agents('old')
+        self.assertTrue(self.busy())
+        self.assertEqual(LOCK.blocked_by(self.state, 'PROJ-1', token='new'), ['old'])
+        self.assertEqual(LOCK.reconcile_reasons(self.state), [])
+
+    def test_empty_or_root_cli_arguments_fail_before_guard_side_effects(self):
+        for option in ('--dir', '--token', '--current-token', '--owns'):
+            for value in ('', '/'):
+                with self.subTest(option=option, value=value):
+                    stderr = io.StringIO()
+                    with patch.object(LOCK, 'guard', return_value=0) as guard, redirect_stderr(stderr):
+                        with self.assertRaises(SystemExit) as stopped:
+                            LOCK.main(['guard', '--dir', str(self.state), option, value])
+                    self.assertEqual(stopped.exception.code, 2)
+                    self.assertIn(option, stderr.getvalue())
+                    guard.assert_not_called()
+        self.assertEqual(self.recorded(), [])
+
+    def test_manual_worker_empty_token_means_no_token(self):
+        self.assertEqual(LOCK.manual_worker_argv(['worker', '--dir', 'd', '--token', '', '--key', 'K']),
+                         ['worker', '--dir', 'd', '--key', 'K'])
+        self.assertEqual(LOCK.manual_worker_argv(['guard', '--token', '']), ['guard', '--token', ''])
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as stopped:
+            LOCK.main(['worker', '--dir', str(self.state), '--token', '/', '--key', 'K'])
+        self.assertEqual(stopped.exception.code, 2)
+
     def test_A1_release_requires_matching_token_and_owns(self):
         self.lock()
         before = (self.state / 'running.json').read_bytes()
@@ -506,6 +609,66 @@ class LivenessDrill(LivenessFixture):
         self.assertEqual(archived, ['dead-worker'])
         if os.environ.get('LIVENESS_DRILL_OUTPUT') == '1':
             print('drill=PASS dead-owner -> immediate-reclaim -> reconcile:dead -> logs+verifier+queue -> ended -> archive=dead-worker only; real_paseo_calls=0')
+
+
+class RunsHygiene(unittest.TestCase):
+    """runs/의 비토큰 폴더는 실행이 아니다(가드가 paseo 조회로 느려진 일, 2026-11-09). 오래된 큰 파일은 gzip만 한다."""
+    TOKEN = 'a' * 32
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.state = Path(temporary.name)
+        self.runs = self.state / 'runs'
+        self.runs.mkdir()
+
+    def ended_run(self, name, days, payload):
+        run = self.runs / name
+        (run / 'logs').mkdir(parents=True)
+        (run / 'logs' / 'big.log').write_bytes(payload)
+        (run / 'small.json').write_text('{}')
+        for marker in ('ended', 'archived'):
+            (run / marker).write_text('x')
+        old = time.time() - days * 86400
+        os.utime(run / 'ended', (old, old))
+        return run
+
+    def test_non_token_folders_are_not_pending_runs_and_are_reported(self):
+        (self.runs / 'morning-20261110').mkdir()
+        (self.runs / 'morning-20261110' / 'PROJ-1-view.json').write_text('{}')
+        (self.runs / 'dump.json').write_text('{}')
+        (self.runs / (self.TOKEN + '.scan.log')).write_text('scan')
+        (self.runs / self.TOKEN).mkdir()
+        (self.runs / 'old').mkdir()
+        (self.runs / 'old' / 'lost').write_text('x')
+        self.assertEqual([path.name for path in LOCK.pending_runs(self.state)], [self.TOKEN, 'old'])
+        self.assertEqual(LOCK.stray_runs(self.state), ['dump.json', 'morning-20261110', 'old'])
+
+    def test_old_archived_token_runs_gzip_big_files_and_never_touch_others(self):
+        payload = b'line\n' * 40
+        run = self.ended_run(self.TOKEN, 8, payload)
+        fresh = self.ended_run('b' * 32, 2, payload)
+        evidence = self.ended_run('PROJ-1389-49723-before-v2', 30, payload)
+        with patch.object(LOCK, 'GZIP_BYTES', 100):
+            self.assertEqual(LOCK.compress_old_runs(self.state), (1, 0))
+            self.assertEqual(LOCK.compress_old_runs(self.state), (0, 0))
+        self.assertFalse((run / 'logs' / 'big.log').exists())
+        with gzip.open(run / 'logs' / 'big.log.gz', 'rb') as stream:
+            self.assertEqual(stream.read(), payload)
+        self.assertTrue((run / 'small.json').exists())
+        self.assertTrue((run / 'retained').exists())
+        for untouched in (fresh, evidence):
+            self.assertEqual((untouched / 'logs' / 'big.log').read_bytes(), payload)
+            self.assertFalse((untouched / 'logs' / 'big.log.gz').exists())
+
+    def test_gzip_limit_per_call_leaves_rest_for_next_call(self):
+        run = self.ended_run(self.TOKEN, 8, b'x' * 200)
+        (run / 'logs' / 'big2.log').write_bytes(b'y' * 200)
+        with patch.object(LOCK, 'GZIP_BYTES', 100):
+            self.assertEqual(LOCK.compress_old_runs(self.state, limit=1), (1, 0))
+            self.assertFalse((run / 'retained').exists())
+            self.assertEqual(LOCK.compress_old_runs(self.state, limit=1), (1, 0))
+        self.assertEqual(sorted(path.name for path in (run / 'logs').iterdir()), ['big.log.gz', 'big2.log.gz'])
 
 
 if __name__ == '__main__':

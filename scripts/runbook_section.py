@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Print Markdown sections: runbook_section.py <file> <section-id>..."""
+"""Print Markdown sections: runbook_section.py <file> <section-id>...
+
+ORCHESTRATOR.md is read together with ORCHESTRATOR-REFERENCE.md (same folder): the tick core and the
+reference share one section numbering, so a citation resolves in whichever file holds it.
+"""
 import re
 from pathlib import Path
 import sys
@@ -51,6 +55,23 @@ def extract_sections(document, sections):
     return "\n\n".join("".join(lines[start:end]).rstrip() for start, end in selected)
 
 
+# Orchestrator-only RUNBOOK sections never go into a worker prompt, even when a brief cites them.
+# §7-6 (기록과 알림) is guard·judge·to-do·notification policy; the worker rules it held live in §0
+# (2026-11-16: §7-6 was 16.5 KB in 77 of 78 worker prompts).
+WORKER_EXCLUDED = {"RUNBOOK": {"7-6"}}
+REFERENCE = {"ORCHESTRATOR.md": "ORCHESTRATOR-REFERENCE.md"}
+
+
+def load_document(path):
+    """Read a policy file; ORCHESTRATOR.md also brings its reference file after it."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    reference = path.with_name(REFERENCE[path.name]) if path.name in REFERENCE else None
+    if reference is not None and reference.exists():
+        text = text.rstrip("\n") + "\n\n" + reference.read_text(encoding="utf-8")
+    return text
+
+
 def cited_sections(brief):
     """Only the two known documents are selectable; paths in briefs are data."""
     requested = {"RUNBOOK": ["0"], "ORCHESTRATOR": []}
@@ -71,10 +92,11 @@ def cited_sections(brief):
 def worker_sections(skill, brief):
     chunks = []
     for document, sections in cited_sections(brief).items():
+        sections = [section for section in sections if section not in WORKER_EXCLUDED.get(document, ())]
         if sections:
             source = skill / f"{document}.md"
             try:
-                content = source.read_text(encoding="utf-8")
+                content = load_document(source)
                 if document == "RUNBOOK":
                     sections = resolve_steps(content, sections)
                 text = extract_sections(content, sections)
@@ -107,7 +129,7 @@ def main():
         print(__doc__, file=sys.stderr)
         return 2
     try:
-        text = extract_sections(Path(sys.argv[1]).read_text(encoding="utf-8"), sys.argv[2:])
+        text = extract_sections(load_document(sys.argv[1]), sys.argv[2:])
     except (OSError, UnicodeError, ValueError) as error:
         print(f"runbook_section: {error}", file=sys.stderr)
         return 1

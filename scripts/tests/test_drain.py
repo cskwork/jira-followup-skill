@@ -1,5 +1,7 @@
 """외부 프로세스를 띄우지 않고 순차 drain의 경계와 장부를 재생한다."""
 import hashlib
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 from pathlib import Path
 import shutil
@@ -7,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -33,6 +36,21 @@ class DrainTest(unittest.TestCase):
     def item(self, **fields):
         return dict(slug=None, stage='intent', service=None, branch=None,
                     commentIds=[], waiting=None, note='', **fields)
+
+    def test_empty_or_root_cli_arguments_fail_before_state_reads_in_both_positions(self):
+        for option in ('--dir', '--token'):
+            for value in ('', '/'):
+                for before_command in (False, True):
+                    with self.subTest(option=option, value=value, before_command=before_command):
+                        stderr = io.StringIO()
+                        args = [option, value, 'rank'] if before_command else ['rank', option, value]
+                        with patch.object(state_update, 'read_object', return_value={}) as read, \
+                                redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+                            with self.assertRaises(SystemExit) as stopped:
+                                drain.main(args)
+                        self.assertEqual(stopped.exception.code, 2)
+                        self.assertIn(option, stderr.getvalue())
+                        read.assert_not_called()
 
     def test_budget_uses_running_json_start_and_caps_default(self):
         self.write('running', 9)
@@ -211,6 +229,28 @@ class DrainTest(unittest.TestCase):
         command = self.cli('check-result','--key','PROJ-1','--result',str(result),'--stderr',str(stderr))
         self.assertEqual(json.loads(command.stdout), dict(rateLimited=False, retryAllowed=True))
 
+    def test_selected_model_at_capacity_is_infra_with_backoff(self):
+        self.write('followup-queue.json', {'PROJ-1': self.item()})
+        result = self.directory / 'result.json'
+        stderr = self.directory / 'stderr.txt'
+        for source in ('result', 'stderr'):
+            with self.subTest(source=source):
+                result.write_text('Selected model is at capacity' if source == 'result' else '{}')
+                stderr.write_text('Selected model is at capacity' if source == 'stderr' else '')
+                self.assertTrue(drain.rate_limited(result, stderr))
+                command = self.cli('check-result', '--key', 'PROJ-1', '--result', str(result),
+                                   '--stderr', str(stderr), '--now', str(self.started + 1))
+                self.assertEqual(command.returncode, 0, command.stderr)
+                self.assertEqual(json.loads(command.stdout), dict(rateLimited=True, retryAllowed=False,
+                                 failureType='infra', deferReason='rate-limit'))
+                item = json.loads((self.directory / 'followup-queue.json').read_text())['PROJ-1']
+                self.assertEqual(item['deferReason'], 'rate-limit')
+                self.assertTrue(drain.backoff_active(item, self.started + 1))
+                self.assertIsNone(item['waiting'])
+        result.write_text('model capacity increased')
+        stderr.write_text('')
+        self.assertFalse(drain.rate_limited(result, stderr))
+
     def test_changed_content_does_not_expand_same_run_duplicate_rate_limit(self):
         item = self.item()
         self.write('followup-queue.json', {'PROJ-1': item})
@@ -230,6 +270,14 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(self.cli('validate-queue').returncode, 2)
         (self.directory/'followup-queue.json').write_text('{broken')
         self.assertEqual(self.cli('validate-queue').returncode, 2)
+
+    def test_validation_accepts_only_closed_delivery_values(self):
+        for value in ('none', 'dev-deployed', 'shipped'):
+            self.write('followup-queue.json', {'PROJ-1': self.item(delivery=value)})
+            self.assertEqual(self.cli('validate-queue').returncode, 0, value)
+        for value in ('dev-e2e', None, ''):
+            self.write('followup-queue.json', {'PROJ-1': self.item(delivery=value)})
+            self.assertEqual(self.cli('validate-queue').returncode, 2, value)
 
     def test_pending_focus_cli_order_and_invalid_json(self):
         self.write('followup-queue.json', {'PROJ-1':self.item(), 'PROJ-2':self.item()})

@@ -13,6 +13,8 @@ import tempfile
 import unittest
 
 
+from _harness import bound  # noqa: E402  부하에 맞춘 하위 프로세스 한도
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("preflight_env", ROOT / "preflight_env.py")
 preflight = importlib.util.module_from_spec(spec)
@@ -34,8 +36,9 @@ class GitFixture(unittest.TestCase):
         self.git("checkout", "-b", "ticket")
 
     def git(self, *args):
+        # 멈춤 감지 한도. 빈 커밋 하나는 0.2~1.4초인데 부하 평균 16~22의 한 프로세스 전체 실행에서 15초를 넘겼다(2026-11-10).
         result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(self.repo), *args],
-                                capture_output=True, text=True, env=self.env, timeout=15)
+                                capture_output=True, text=True, env=self.env, timeout=bound(15))
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
@@ -118,6 +121,15 @@ class DeployChecks(GitFixture):
         self.assertEqual((code, data["status"], data["contains_expect"]), (0, "PASS", True))
         self.assertEqual(data["expect_sha"], self.expect)
         self.assertEqual(data["checkout_commit"], self.checkout)
+
+    def test_report_echoes_context_and_key_for_requirements(self):
+        fixture = Path(self.temp.name) / "run.json"
+        fixture.write_text(json.dumps({"number": 662, "status": "completed", "result": "SUCCESS",
+                                       "scm": {"branch": "refs/remotes/origin/dev", "commit": self.checkout}}))
+        code, data = self.cli("check_deploy.py", "--job", "web-dev", "--build", "662",
+                              "--repo", self.repo, "--expect", self.expect, "--run-json", fixture,
+                              "--key", "PROJ-1470")
+        self.assertEqual((code, data["key"], data["context"], data["job"]), (0, "PROJ-1470", "dev", "web-dev"))
 
     def test_success_older_checkout_fails(self):
         code, data = self.check(checkout=self.base)
@@ -229,7 +241,7 @@ class PreflightChecks(unittest.TestCase):
     def result(self, data, name):
         return next(r for r in data["results"] if r["name"] == name)
 
-    def test_dev_vpn_audit_db_wrong_vpn_skips_db_and_needs_human(self):
+    def test_dev_vpn_stg_db_wrong_vpn_skips_db_and_needs_human(self):
         code, data = self.check("stg-db")
         row = self.result(data, "stg-db")
         self.assertEqual((code, data["status"], row["status"]), (10, "HUMAN", "FAIL"))
@@ -244,7 +256,7 @@ class PreflightChecks(unittest.TestCase):
         self.assertEqual((code, data["status"], data["vpn"]), (0, "PASS", "dev"))
         self.assertTrue(all(r["status"] == "PASS" for r in data["results"]))
 
-    def test_audit_web_503_is_down_without_vpn_requirement(self):
+    def test_stg_web_503_is_down_without_vpn_requirement(self):
         # 2026-10-21 PROJ-1405: 스테이징 웹 503(본문 0B)인데 점검 항목이 없어 가드가 자동 재개하지 못했다.
         code, data = self.check("stg-web", vpn="dev", ai=503)
         row = self.result(data, "stg-web")
@@ -302,11 +314,11 @@ class PreflightChecks(unittest.TestCase):
         code, data = self.check("dev-ai", errors={"vpn": subprocess.TimeoutExpired("vpn", 2)})
         self.assertEqual((code, data["status"]), (10, "HUMAN"))
 
-    def test_audit_vpn_and_actual_audit_host_pass(self):
+    def test_stg_vpn_and_actual_stg_host_pass(self):
         code, data = self.check("stg-db,stg-ai", vpn="stg", host="stg-db001")
         self.assertEqual((code, data["status"], data["vpn"]), (0, "PASS", "stg"))
 
-    def test_audit_vpn_with_dev_hostname_still_needs_human(self):
+    def test_stg_vpn_with_dev_hostname_still_needs_human(self):
         code, data = self.check("stg-db", vpn="stg", host="dev-dbv2-001-4g42")
         row = self.result(data, "stg-db")
         self.assertEqual((code, row["status"], row["reason"]), (10, "FAIL", "hostname-mismatch"))

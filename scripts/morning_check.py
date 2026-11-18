@@ -14,6 +14,7 @@ import argparse
 import base64
 from datetime import datetime, timedelta
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -22,7 +23,9 @@ import urllib.request
 
 import followup_config as cfg
 from followup_scan import INFLIGHT_JQL, ME, plain
-from state_update import transaction
+import morning_track as track
+from state_update import atomic_json, read_object, transaction
+from teams_room import CHAT_ID, code_of
 
 TZ = cfg.TZ
 BASE = cfg.HOME_DIR
@@ -32,7 +35,15 @@ ORDER = list(cfg.STATUS_ORDER)
 TARGETS = [('prd', cfg.get('STATUS_ON_PROD', ORDER[-1])), ('stg', cfg.get('STATUS_ON_STG', ORDER[3])),
            ('dev', cfg.get('STATUS_ON_DEV', ORDER[1]))]
 BRANCH = {'dev': cfg.BRANCH_DEV, 'stg': cfg.BRANCH_STG, 'prd': cfg.BRANCH_MAIN}
+# Git 반영만으로는 QA 단계로 옮기지 않는다(2026-11-02: dev QA·결과 댓글 없이 개발 QA 요청 단계로 이동한 사고).
+# 자동 이동은 QA가 끝난 STATUS_QA_DONE(기본 STATUS_ORDER 다섯째) 이상에서 prd 태그로 운영 단계로 가는 것만 남긴다.
+QA_DONE = ORDER.index(cfg.STATUS_QA_DONE)
+QA_HOLD = '반영 확인·QA 증빙 전: 자동 이동 안 함'
 CLASSES = {'답변 필요', '확인·조치 요청', '정보 공유'}
+# 주간 회고(RETRO.md)는 개선안을 origin/retro/* 브랜치로만 올리고 병합은 사람이 한다. 7일 넘게 남은 것은 사람 할 일로 올린다.
+# RETRO_REPO: 회고 브랜치를 올리는 저장소(기본: 이 스킬 저장소).
+SKILLS_REPO = cfg.RETRO_REPO
+RETRO_DAYS = 7
 
 
 # Optional wrapper for every external command, e.g. a log-compressing proxy (e.g. CMD_PREFIX="mywrapper proxy").
@@ -95,9 +106,11 @@ def cell(value):
 
 
 class Morning:
-    def __init__(self, base, root, out, *, runner=command, rest=jira_get, refs=None, note=None):
+    def __init__(self, base, root, out, *, runner=command, rest=jira_get, refs=None, note=None, skills_repo=None):
         self.base, self.root, self.out = Path(base), Path(root), Path(out)
         self.runner, self.rest, self.refs, self.note = runner, rest, refs, note
+        self.skills_repo, self.retro = skills_repo, []
+        self.health, self.carry = [], None
         self.reauthed = False
         self.errors = []
         self.fetch_errors = {}
@@ -355,6 +368,8 @@ class Morning:
                 row['reason'] = '브랜치 없음: 자동 이동 근거 없음'
             elif issue['status'] not in ORDER:
                 row['reason'] = '자동 이동 대상 상태 밖: ' + issue['status']
+            elif target and ORDER.index(target) > ORDER.index(issue['status']) and not self.auto_allowed(issue['status'], target):
+                row['reason'] = f"{QA_HOLD}(반영 목표 {target})"
             elif target and ORDER.index(target) > ORDER.index(issue['status']):
                 if not self.fresh_refs(issue, data):
                     row['reason'] = '낡은 ref로 이동 보류'
@@ -367,11 +382,16 @@ class Morning:
                     target = next((status for env, status in TARGETS if deployed[env]), None)
                     row['target'] = target
                     if target and ORDER.index(target) > ORDER.index(issue['status']):
-                        row['reason'] = 'candidate'
+                        row['reason'] = 'candidate' if self.auto_allowed(issue['status'], target) else f"{QA_HOLD}(반영 목표 {target})"
             issue['deployment'] = deployed
             result.append(row)
         dump(self.out / 'transition-plan.json', result)
         return result
+
+    @staticmethod
+    def auto_allowed(status, target):
+        """QA가 끝난 뒤(STATUS_QA_DONE 이상) prd 태그로 운영 단계로 가는 이동만 자동으로 한다."""
+        return target == TARGETS[0][1] and status in ORDER and ORDER.index(status) >= QA_DONE
 
     def transitions(self, data, plan, execute=False):
         for row in plan:
@@ -387,6 +407,9 @@ class Morning:
                 issue.update(status=current, updated=raw['fields']['updated'])
                 if current not in ORDER or ORDER.index(current) >= ORDER.index(target):
                     row['reason'] = '최신 상태에서 앞으로 이동할 목표 없음'
+                    continue
+                if not self.auto_allowed(current, target):
+                    row['reason'] = f"{QA_HOLD}(반영 목표 {target})"
                     continue
                 while ORDER.index(row['after']) < ORDER.index(target):
                     n = len(row['steps']) + 1
@@ -430,13 +453,235 @@ class Morning:
         dump(self.out / 'transition-results.json', plan)
         return plan
 
+    def teams_action(self, now):
+        """Teams 스캔·가드 기록으로 사람이 복구할 장기 감시 장애를 반환한다."""
+        path = self.base / 'teams-scan.json'
+        if path.exists():
+            scan = load(path, {})
+        else:
+            # 스캔 자식이 실패하면 출력 파일이 없다. 가드의 명시적 장애만 보완한다.
+            guard = load(self.base / 'guard-last.json', {})
+            if not isinstance(guard, dict) or not isinstance(guard.get('reasons', []), list):
+                raise ValueError('잘못된 guard-last.json')
+            reasons = guard.get('reasons', [])
+            teams = guard.get('teams', {})
+            if not isinstance(teams, dict) or any(not isinstance(reason, str) for reason in reasons):
+                raise ValueError('잘못된 guard-last.json Teams 상태')
+            code = next((reason.split(':', 1)[1] for reason in reasons
+                         if reason.startswith('teams-unavailable:')), None)
+            if teams.get('status') != 'unavailable' and code is None:
+                return None
+            scan = {'status': 'unavailable', 'error': teams.get('error') or code}
+        if not isinstance(scan, dict) or scan.get('status') not in ('ok', 'unavailable'):
+            raise ValueError('잘못된 Teams 스캔 상태')
+        monitoring = scan.get('monitoring')
+        if isinstance(monitoring, dict) and 'lastSuccessAt' in monitoring:
+            success = monitoring['lastSuccessAt']
+        else:
+            # 스캔에 감시 상태가 없으면 방별 감시 기록을 읽는다. mark는 성공 근거가 아니다.
+            rooms = load(self.base / 'teams-room.json', {})
+            room = rooms.get(CHAT_ID, {}) if isinstance(rooms, dict) else None
+            if not isinstance(room, dict) or not isinstance(room.get('monitoring', {}), dict):
+                raise ValueError('잘못된 Teams 방 상태')
+            success = room.get('monitoring', {}).get('lastSuccessAt')
+        last_success = None
+        if success is not None:
+            try:
+                last_success = iso(success)
+            except (AttributeError, TypeError, ValueError):
+                raise ValueError('잘못된 Teams lastSuccessAt') from None
+            if last_success.tzinfo is None:
+                raise ValueError('Teams lastSuccessAt 시간대 없음')
+        if scan['status'] == 'ok':
+            return None
+        if last_success is not None and now - last_success <= timedelta(hours=24):
+            return None
+        reason = '성공 이력 없음' if last_success is None else '마지막 성공 후 24시간 초과'
+        code = code_of(scan.get('error'), 'TEAMS_READ_FAILED')
+        return f'Teams 감시 복구 필요: {reason} ({code}); `{cfg.CHAT_RECONNECT_HINT}`'
+
+    def check_health(self, data, now):
+        """의존성 상태. 실패는 오류로 센다(git fetch 실패는 collect가 저장소별로 이미 셌다). 미확인은 세지 않고 따로 보인다."""
+        self.health = track.health(self.base, now, fetches=data['repoFetch'], reauthed=self.reauthed)
+        for row in self.health:
+            if row['status'] == track.FAIL and row['id'] != 'git':
+                blocked = ('; 막힌 일: ' + ', '.join(row['blocked'])) if row['blocked'] else ''
+                self.error('의존성', row['name'], row['detail'] + blocked)
+        dump(self.out / 'health.json', self.health)
+        return self.health
+
+    def retro_branches(self, now, fetch=True):
+        """origin/main에 없는 origin/retro/* 중 끝 커밋이 7일보다 오래된 것. 병합·삭제는 하지 않는다.
+        fetch=False(dry-run)는 네트워크 없이 이미 받은 ref만 본다."""
+        repo = self.skills_repo
+        if repo is None:
+            if self.base.resolve() != BASE.resolve():
+                return []  # 사용자 지정 --base: 실제 공장 저장소를 보지 않는다.
+            repo = SKILLS_REPO
+        fetch = self.git(repo, 'fetch', 'origin', '--prune', '--quiet', timeout=300) if fetch else None
+        if fetch is not None and fetch.returncode:
+            raise RuntimeError('회고 제안 fetch 실패 rc=' + str(fetch.returncode))
+        listed = self.git(repo, 'for-each-ref', '--no-merged', 'origin/main',
+                          '--format=%(refname:lstrip=3)%09%(objectname)%09%(committerdate:iso-strict)%09%(subject)',
+                          'refs/remotes/origin/retro/')
+        if listed.returncode:
+            raise RuntimeError('회고 제안 브랜치 조회 실패 rc=' + str(listed.returncode))
+        found = []
+        for text in listed.stdout.splitlines():
+            branch, sha, at, subject = text.split('\t', 3)
+            days = (now - iso(at)).days
+            if days > RETRO_DAYS:
+                found.append({'branch': branch, 'sha': sha, 'days': days, 'subject': ' '.join(subject.split())})
+        dump(self.out / 'retro-proposals.json', found)
+        return found
+
+    def retro_decision(self, found, opener=None):
+        """미병합 회고 제안 묶음 하나를 사람 결정으로 연다. 같은 묶음(브랜치·끝 커밋)은 다시 열지 않고,
+        다른 묶음이 열려 있으면 그 답을 먼저 기다린다. judge는 거치지 않는다(공장 자신을 바꾸는 결정)."""
+        import hashlib
+        name = 'retro-proposals-' + hashlib.sha256(
+            '\n'.join(sorted(f"{r['branch']}@{r['sha']}" for r in found)).encode()).hexdigest()[:16]
+        codes = read_object(self.base / 'decision-pages/codes.json')
+        for row in codes.values():
+            if not isinstance(row, dict) or not str(row.get('name', '')).startswith('retro-proposals-'):
+                continue
+            if row.get('state') == 'open' or (row.get('name') == name and row.get('reason') != 'todo-open-failed'):
+                return 'already-asked'
+        lines = [f"{r['branch']} — {r['subject'][:120]} ({r['days']}일)" for r in found]
+        spec = {'kind': 'choice', 'key': 'FACTORY', 'humanReason': 'policy',
+                'title': f'[회고 제안] 미병합 {len(found)}건',
+                'question': '오래 남은 회고 제안 브랜치를 어떻게 할까요?',
+                'summary': '; '.join(lines) + '. 공장은 병합·삭제하지 않습니다.',
+                'evidence': [str(self.out / 'retro-proposals.json')], 'recommended': 'merge',
+                'recommendReason': '회고 제안은 실패 사례와 시험을 함께 담은 수정이라, 둘수록 main과 어긋납니다.',
+                'options': [
+                    {'id': 'merge', 'label': '병합', 'detail': '사람이 검토해 main에 병합합니다(공장은 병합하지 않음).'},
+                    {'id': 'drop', 'label': '버림', 'detail': '사람이 브랜치를 지웁니다.'},
+                    {'id': 'keep-waiting', 'label': '더 기다림', 'detail': '이 묶음은 다시 묻지 않습니다.'}]}
+        path = self.base / 'retro-decisions' / (name + '.json')
+        atomic_json(path, spec)
+        (opener or open_retro_request)(self.base, path)
+        return 'opened'
+
+    def carry_view(self, listed, date):
+        """조치 이월: 이어진 보고서 횟수와 결정으로 미룬·뺀 조치. 읽기만 한다(기록은 save_carry)."""
+        state = track.load_carry(self.base)
+        prior = track.prior_snapshot(state, date)
+        labels = {}
+        for key, kind, text in listed:
+            ident = track.item_id(key, kind)
+            text = ('' if key == 'FACTORY' else key + ' ') + ' '.join(text.split())[:80]
+            labels[ident] = labels[ident] + ' / ' + text if ident in labels else text
+        counted = track.streaks(prior.get('items', {}), list(labels), date)
+        hidden = track.suppression(state.get('decisions', {}), track.answers(self.base), counted, date)
+        failing = [row['id'] for row in self.health if row['status'] == track.FAIL]
+        health = track.streaks(prior.get('health', {}), failing, date)
+        view = {'date': date, 'counted': counted, 'hidden': hidden, 'labels': labels,
+                'snapshot': {'items': counted, 'health': health}, 'decision': None}
+        dump(self.out / 'carry-over.json', view)
+        return view
+
+    def escalations(self):
+        view = self.carry
+        return {ident: row for ident, row in view['counted'].items()
+                if row['count'] >= track.ESCALATE_AT and ident not in view['hidden']
+                and ident.split('|', 1)[1] not in track.NOT_ESCALATED}
+
+    def carry_decision(self, opener=None):
+        """3회 넘게 이어진 조치 묶음 하나를 사람 결정으로 연다(retro_decision과 같은 규칙: 같은 묶음은 다시 묻지 않고,
+        이월 결정이 열려 있으면 그 답을 기다린다). judge는 거치지 않는다. 공장은 조치를 스스로 하지 않는다."""
+        candidates = self.escalations()
+        if not candidates:
+            return 'none'
+        name = track.decision_name(candidates)
+        codes = read_object(self.base / 'decision-pages/codes.json')
+        for row in codes.values():
+            if not isinstance(row, dict) or not str(row.get('name', '')).startswith(track.CARRY_DECISION):
+                continue
+            if row.get('state') == 'open' or (row.get('name') == name and row.get('reason') != 'todo-open-failed'):
+                return 'already-asked'
+        spec, defer = track.decision_spec(candidates, self.carry['labels'], self.carry['date'], self.out / 'carry-over.json')
+        path = self.base / 'morning-decisions' / (name + '.json')
+        atomic_json(path, spec)
+        # 답(defer·drop)이 어느 조치에 걸리는지는 여기서만 안다. 결정을 열기 전에 남긴다.
+        meta = {'items': {ident: row['since'] for ident, row in candidates.items()}, 'deferUntil': defer,
+                'openedAt': self.carry['date']}
+        transaction(self.base, track.CARRY_FILE, lambda state: state.setdefault('decisions', {}).update({name: meta}))
+        (opener or open_retro_request)(self.base, path)
+        return 'opened'
+
+    def save_carry(self):
+        """보고서를 저장한 실행만 횟수를 남긴다. 같은 날 재실행은 그날 앞 기록(previous)을 기준으로 다시 센다."""
+        view = self.carry
+
+        def update(state):
+            if state.get('date') != view['date']:
+                state['previous'] = state.get('current', {})
+            state.update(date=view['date'], current=view['snapshot'])
+            state.setdefault('decisions', {})
+        transaction(self.base, track.CARRY_FILE, update)
+
+    def health_lines(self):
+        streak = (self.carry or {}).get('snapshot', {}).get('health', {})
+        lines = ['## 의존성 상태', '', '실패는 오류 수에 들어간다. 기록이 없거나 낡아 모르는 것은 미확인이다(정상으로 보지 않는다).', '',
+                 '| 의존성 | 상태 | 언제부터 | 연속 실패 | 내용 | 근거 |', '|---|---|---|---|---|---|']
+        for row in self.health:
+            since, mine = row['since'] or '', streak.get(row['id'])
+            if row['status'] == track.FAIL and mine:
+                since += ('; ' if since else '') + f"아침 점검 {mine['count']}회째({mine['since']}부터)"
+            detail = row['detail'] + ('; 막힌 일: ' + ', '.join(row['blocked']) if row['blocked'] else '')
+            failures = '—' if row['failures'] is None else f"{row['failures']}회"
+            lines.append('| ' + ' | '.join(map(cell, [row['name'], row['status'], since or '—', failures, detail,
+                                                     row['source']])) + ' |')
+        return lines + ['']
+
+    def carry_lines(self, listed):
+        view = self.carry
+        lines = ['', '## 조치 연속 횟수', '',
+                 f'같은 조치(티켓 키 + 조치 종류)가 이어진 보고서 {track.ESCALATE_AT}회에 나오면 결정 하나로 묻는다.', '']
+        idents = list(dict.fromkeys((key, kind) for key, kind, _ in listed))
+        if not idents:
+            return lines + ['없음']
+        lines += ['| 대상 | 조치 종류 | 연속 보고 | 처음 | 비고 |', '|---|---|---|---|---|']
+        rows = sorted(idents, key=lambda pair: (-view['counted'][track.item_id(*pair)]['count'], pair))
+        for key, kind in rows:
+            ident = track.item_id(key, kind)
+            count = view['counted'][ident]
+            lines.append('| ' + ' | '.join(map(cell, [key, track.KINDS.get(kind, kind), f"{count['count']}회",
+                                                     count['since'], view['hidden'].get(ident, '')])) + ' |')
+        escalate = self.escalations()
+        if escalate:
+            state = {'opened': '결정을 열었다', 'already-asked': '같은 묶음을 이미 물었거나 이월 결정이 열려 있다',
+                     None: '--execute 기본 상태 폴더에서만 연다'}.get(view['decision'], view['decision'])
+            lines += ['', f"{track.ESCALATE_AT}회 넘긴 조치 {len(escalate)}건: {state}."]
+        return lines
+
     def report(self, data, plan, judgments):
-        pending, drafts, actions = [], [], {}
+        pending, drafts, notes_by_key = [], [], {}
+        factory = []  # (조치 종류, 문구). 조치 이월은 티켓 키 + 종류로 같은 조치를 알아본다(문구는 날마다 바뀐다).
+        tracking = load(self.base / 'lesson-decisions/tracking-error.json', {})
+        if tracking:  # lessons.TRACKING_ERROR: '[공장 수정]' 할 일 추적 실패(다음 lesson·수신기 회차가 다시 시도).
+            factory.append(('lesson-tracking', '공장 수정 추적 실패: ' + '; '.join(
+                f"{where} {row.get('at', '')[:16]} {row.get('error', '')}" for where, row in sorted(tracking.items()))))
+        if self.retro:
+            factory.append(('retro', f'회고 제안 미병합 {len(self.retro)}건: '
+                            + ', '.join(f"{r['branch']}({r['days']}일)" for r in self.retro)))
+        guard = load(self.base / 'guard-last.json', {})
+        if not isinstance(guard, dict) or not isinstance(guard.get('reasons', []), list):
+            raise ValueError('잘못된 guard-last.json')
+        for reason in guard.get('reasons', []):
+            if not isinstance(reason, str):
+                raise ValueError('잘못된 guard-last.json reasons')
+            if reason.startswith('pending-focus-blocked:'):
+                factory.append(('pending-focus', 'pending focus 차단 확인 필요: ' + reason))
+        teams_action = self.teams_action(iso(data['startedAt']))
+        if teams_action:
+            factory.append(('teams-watch', teams_action))
         for issue in data['issues']:
             key = issue['key']
-            notes = []
+            notes = notes_by_key[key] = []
             if issue.get('error'):
-                notes.append('조회 실패')
+                notes.append(('lookup-failed', '조회 실패'))
             for c in issue.get('freshComments', []):
                 judgment = judgments.get('comments', {}).get(str(c['id']))
                 if judgment:
@@ -444,35 +689,53 @@ class Morning:
                         raise ValueError('댓글 판정의 키 또는 분류 오류: ' + str(c['id']))
                     c['judgment'] = judgment['classification']
                     if c['judgment'] != '정보 공유' and not c['answeredByMeAfter']:
-                        notes.append('댓글 ' + str(c['id']) + ' ' + c['judgment'])
+                        notes.append(('comment', '댓글 ' + str(c['id']) + ' ' + c['judgment']))
                     if judgment.get('draft'):
                         drafts.append((key, judgment.get('summary', c['text']), judgment['draft']))
                 else:
                     pending.append(str(c['id']))
-                    notes.append('댓글 ' + str(c['id']) + ' 모델 판정 필요')
+                    notes.append(('comment', '댓글 ' + str(c['id']) + ' 모델 판정 필요'))
             if issue.get('idleBusinessDays', 0) > 7:
-                notes.append(str(issue['idleBusinessDays']) + ' 업무일 미갱신')
+                notes.append(('idle', str(issue['idleBusinessDays']) + ' 업무일 미갱신'))
             if issue.get('newlyAssigned'):
-                notes.append('신규 배정 이력 확인')
+                notes.append(('assigned', '신규 배정 이력 확인'))
             if any(h['field'] == 'status' and not h['byMe'] for h in issue.get('history', [])):
-                notes.append('타인 상태 변경 이력 확인')
+                notes.append(('status-by-other', '타인 상태 변경 이력 확인'))
             row = next((r for r in plan if r['key'] == key), {})
             if row.get('reason') in ('낡은 ref로 이동 보류', '목표까지 가능한 앞 단계 전이 없음') or 'FAIL' in row.get('reason', ''):
-                notes.append(row['reason'])
+                notes.append(('transition', row['reason']))
             supplied = judgments.get('issues', {}).get(key, {})
             if supplied.get('action'):
-                notes.append(supplied['action'])
-            actions[key] = ' / '.join(notes) or '없음'
-        moves = sum(s['result'] == 'PASS' for r in plan for s in r['steps'])
-        needs = sum(value != '없음' for value in actions.values())
+                notes.append(('model-action', supplied['action']))
         date = iso(data['startedAt']).astimezone(TZ).date().isoformat()
+        listed = [(key, kind, text) for key, notes in notes_by_key.items() for kind, text in notes]
+        listed += [('FACTORY', kind, text) for kind, text in factory]
+        decision = self.carry['decision'] if self.carry else None  # report는 두 번 불린다. 결정 결과를 잇는다.
+        self.carry = carry = self.carry_view(listed, date)
+        carry['decision'] = decision
+        shown = lambda key, kind: track.item_id(key, kind) not in carry['hidden']  # noqa: E731
+        actions = {key: ' / '.join(text for kind, text in notes if shown(key, kind)) or '없음'
+                   for key, notes in notes_by_key.items()}
+        factory_actions = [text for kind, text in factory if shown('FACTORY', kind)]
+        moves = sum(s['result'] == 'PASS' for r in plan for s in r['steps'])
+        needs = sum(value != '없음' for value in actions.values()) + len(factory_actions)
+        failed = [row['name'] for row in self.health if row['status'] == track.FAIL]
+        unknown = [row['name'] for row in self.health if row['status'] == track.UNKNOWN]
+        # 실패한 의존성은 오류에 들어 있다(check_health). 오류 0건·'없음'은 실패한 의존성이 하나도 없을 때만 나온다.
+        errors = f'{len(self.errors)}건' + (f' (의존성 실패 {len(failed)}건 포함)' if failed else '')
         lines = [f'# Jira 아침 점검 — {date}', '', '| 항목 | 내용 |', '|---|---|',
-                 '| 오늘 먼저 할 일 | ' + cell(', '.join(k for k, v in actions.items() if v != '없음') or '추가 조치 없음') + ' |',
-                 f'| 조치 필요 수 | {needs}건 |', f'| 자동 상태 이동 수 | {moves}회 |',
-                 f'| BLOCKED·오류 | {len(self.errors)}건 / 댓글 모델 판정 대기 {len(pending)}건 |', '',
+                 '| 오늘 먼저 할 일 | ' + cell(', '.join([k for k, v in actions.items() if v != '없음'] + factory_actions) or '추가 조치 없음') + ' |',
+                 f'| 조치 필요 수 | {needs}건' + (f" (미룸·뺌 {len(carry['hidden'])}건 제외)" if carry['hidden'] else '') + ' |',
+                 f'| 자동 상태 이동 수 | {moves}회 |',
+                 f'| BLOCKED·오류 | {errors} / 댓글 모델 판정 대기 {len(pending)}건 |',
+                 '| 의존성 | ' + cell(f'실패 {len(failed)}' + (f"({', '.join(failed)})" if failed else '')
+                                    + f' / 미확인 {len(unknown)}' + (f"({', '.join(unknown)})" if unknown else '')
+                                    + f" / 경고 {sum(r['status'] == track.WARN for r in self.health)}"
+                                    + f" / 정상 {sum(r['status'] == track.PASS for r in self.health)}") + ' |', '',
                  '확인 구간: ' + data['since'] + ' 이후. 새로 관찰한 티켓과 신규 배정 이력을 구분했다.',
-                 '배포 O/X는 Git ref 포함 여부이며 실제 서버 배포 검증을 뜻하지 않는다. 업무일은 주말만 제외한다.', '',
-                 '## 티켓', '', '| 티켓 | 제목(짧게) | 상태(변화) | 새 댓글 | 배포 반영 dev/stg/prd | 필요한 조치 |', '|---|---|---|---|---|---|']
+                 '배포 O/X는 Git ref 포함 여부이며 실제 서버 배포 검증을 뜻하지 않는다. 업무일은 주말만 제외한다.', '']
+        lines += self.health_lines()
+        lines += ['## 티켓', '', '| 티켓 | 제목(짧게) | 상태(변화) | 새 댓글 | 배포 반영 dev/stg/prd | 필요한 조치 |', '|---|---|---|---|---|---|']
         for issue in sorted(data['issues'], key=lambda i: (actions[i['key']] == '없음', i['key'])):
             key = issue['key']
             if issue.get('error'):
@@ -487,6 +750,7 @@ class Morning:
             if issue['refs'].get('status') == 'carried':
                 dep += ' (다른 티켓 브랜치에 포함)'
             lines.append('| ' + ' | '.join(map(cell, [key, issue['summary'], status, comments, dep, actions[key]])) + ' |')
+        lines += self.carry_lines(listed)
         lines += ['', '## 이력·하위 작업', '']
         for issue in data['issues']:
             if issue.get('error'):
@@ -565,12 +829,23 @@ class Morning:
         last = lines[-1] if lines else ''
         if last.startswith('devnote=BLOCKED '):
             return last
-        if result.returncode == 0 and last.startswith('devnote=ok '):
+        if result.returncode == 0 and last.startswith(('devnote=ok ', 'devnote=skipped ')):
             return last
         return 'devnote=BLOCKED dev_note_sync 실패 rc=' + str(result.returncode)
 
 
-def main(argv=None, *, runner=command, rest=jira_get, refs=None, note=None, now=None):
+def open_retro_request(base, path):
+    """lessons.open_request와 같은 결정 화면 경로. judge는 건너뛴다."""
+    subprocess.run([str(Path(__file__).with_name('decision-request')), 'spec', str(path)],
+                   env={**os.environ, 'JIRA_WAKE_DIR': str(Path(base).resolve()), 'JIRA_JUDGE_SKIP': '1'},
+                   capture_output=True, text=True, check=True, timeout=120)
+
+
+BLOCKING = ('issue', 'history', 'transition', 'refs')
+
+
+def main(argv=None, *, runner=command, rest=jira_get, refs=None, note=None, now=None, skills_repo=None, retro_opener=None,
+         carry_opener=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--execute', action='store_true', help='Jira 전이·보고서·state·개발자 노트·done-today 기록')
@@ -582,23 +857,40 @@ def main(argv=None, *, runner=command, rest=jira_get, refs=None, note=None, now=
     args = parser.parse_args(argv)
     started = now or datetime.now(TZ)
     date = started.astimezone(TZ).date().isoformat()
-    out = args.out_dir or args.base / 'runs' / ('morning-' + started.strftime('%Y%m%d-%H%M%S-%f'))
-    morning = Morning(args.base, args.root, out, runner=runner, rest=rest, refs=refs, note=note)
+    # runs/는 실행 토큰 폴더만 둔다. 증거 폴더를 두면 가드가 끝나지 않은 실행으로 보고 키마다 paseo를 조회한다(2026-11-09).
+    out = args.out_dir or args.base / 'morning' / ('morning-' + started.strftime('%Y%m%d-%H%M%S-%f'))
+    morning = Morning(args.base, args.root, out, runner=runner, rest=rest, refs=refs, note=note, skills_repo=skills_repo)
     report_path, moves, needs, line = out / 'report.md', 0, 0, 'devnote=skipped dry-run'
     try:
         judgments = load(args.judgments, {}) if args.judgments else {}
         data = morning.collect(started)
         plan = morning.plan(data)
+        morning.check_health(data, started)
         # Validate supplied model judgments before any external write.
-        morning.report(data, plan, judgments)
+        _, _, _, pending = morning.report(data, plan, judgments)
         morning.transitions(data, plan, args.execute)
+        try:
+            # dry-run은 공장 저장소를 fetch하지 않는다(이미 받은 ref만 본다).
+            morning.retro = morning.retro_branches(started, fetch=args.execute)
+            if morning.retro and args.execute:
+                morning.retro_decision(morning.retro, retro_opener)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            morning.error('retro', 'retro/*', str(error)[:300])
+        # 조치 이월 결정은 보고서를 저장할 실행(--execute, 막힘 없음)에서만, 기본 상태 폴더에서만 연다(retro와 같다).
+        saving = args.execute and not pending and not any(e['scope'] in BLOCKING for e in morning.errors)
+        if saving and morning.base.resolve() == BASE.resolve():
+            try:
+                morning.carry['decision'] = morning.carry_decision(carry_opener)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                morning.error('carry', 'morning-carry', str(error)[:300])
         report, moves, needs, pending = morning.report(data, plan, judgments)
-        blockers = [e for e in morning.errors if e['scope'] in ('issue', 'history', 'transition', 'refs')]
+        blockers = [e for e in morning.errors if e['scope'] in BLOCKING]
         if args.execute:
             if blockers or pending:
                 line = 'devnote=skipped BLOCKED: 수집·되읽기 실패 또는 댓글 모델 판정 대기, state/done-today 미기록'
             else:
                 report_path = morning.save(data, report, date)
+                morning.save_carry()
                 line = morning.sync_note(date)
                 (args.base / 'done-today').write_text(date + '\n')
                 if (args.base / 'done-today').read_text().strip() != date:

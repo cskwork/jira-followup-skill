@@ -1,8 +1,8 @@
 #!/bin/bash
-# 사람 결정 페이지를 백그라운드로 띄우고 기본 브라우저로 연다 (decision_page.py).
+# 사람 결정을 연다: 결정 화면 설정이 html이면 결정 페이지(decision_page.py)를 기본 브라우저로, 아니면 할 일 '확인 필요' 항목(decision_inbox.py).
 # Usage: decision-request stg-approval <KEY>
 #        decision-request spec <spec.json>
-# 오케스트레이터는 사람 결정이 필요할 때마다 이것을 부른다(ORCHESTRATOR §5). 버튼 클릭 = 결정.
+# 오케스트레이터는 사람 결정이 필요할 때마다 이것을 부른다(ORCHESTRATOR §5). 버튼 클릭 또는 할 일 답글 = 결정.
 set -u
 : "${JIRA_FOLLOWUP_HOME:=$HOME/.jira-followup}"
 mode=${1:-} target=${2:-}
@@ -14,11 +14,49 @@ case "$mode" in
   *) echo "usage: decision-request stg-approval <KEY> | spec <spec.json>" >&2; exit 2 ;;
 esac
 here=$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().parent)' "$0")
-dir="${JIRA_WAKE_DIR:-$JIRA_FOLLOWUP_HOME}/decision-pages"
+state_dir="${JIRA_WAKE_DIR:-$JIRA_FOLLOWUP_HOME}"
+dir="$state_dir/decision-pages"
 mkdir -p "$dir"
-url_file="$dir/$name.url"
-: > "$url_file"
-nohup python3 "$here/decision_page.py" "$mode" "$target" --open --url-file "$url_file" >> "$dir/$name.log" 2>&1 &
-for _ in $(seq 1 90); do [ -s "$url_file" ] && break; sleep 1; done
-[ -s "$url_file" ] || { echo "decision-request: page did not start (see $dir/$name.log)"; exit 1; }
-echo "decision-request: opened $mode page for $name"
+# 위험이 낮은 choice는 판정 에이전트가 먼저 본다(사용자 지시 2026-11-09). 판정은 몇 분 걸리므로 분리 실행한다:
+# judge가 정하면 decisions.jsonl(by=judge)에 남기고 jira-daily-wake --now --key로 재개, 넘기면 같은 결정 코드로
+# 사람 항목을 연다. 그 밖(모드 off·사람만 정할 결정·JIRA_JUDGE_SKIP)은 아래 사람 경로다.
+if [ "$mode" = spec ] && python3 "$here/judge.py" applies "$target" --dir "$state_dir" >> "$dir/$name.log" 2>&1; then
+  nohup python3 "$here/judge.py" choice "$target" --dir "$state_dir" --async >> "$dir/$name.log" 2>&1 &
+  echo "decision-request: judge reviewing $name (decided → decisions.jsonl by=judge and resumes; escalated → to-do item opens)"
+  exit 0
+fi
+# 결정 화면 설정(<state>/decision-surface: app|tui|web|html, 없으면 html). html이 아니면 할 일 '확인 필요'에만 올린다.
+surface=$(python3 "$here/decision_inbox.py" surface --dir "$state_dir") || exit 1
+if [ "$surface" = html ]; then
+  url_file="$dir/$name.url"
+  : > "$url_file"
+  nohup python3 "$here/decision_page.py" "$mode" "$target" --dir "$state_dir" --open --url-file "$url_file" >> "$dir/$name.log" 2>&1 &
+  page_pid=$!
+  for _ in $(seq 1 90); do
+    [ -s "$url_file" ] && break
+    kill -0 "$page_pid" 2>/dev/null || break
+    sleep 1
+  done
+  [ -s "$url_file" ] || { tail -n 5 "$dir/$name.log" >&2; echo "decision-request: page did not start (see $dir/$name.log)" >&2; exit 1; }
+else
+  opened=$(python3 "$here/decision_inbox.py" open "$mode" "$target" --dir "$state_dir" 2>> "$dir/$name.log") \
+    || { tail -n 5 "$dir/$name.log" >&2; echo "decision-request: to-do item not created (see $dir/$name.log)" >&2; exit 1; }
+fi
+if python3 -c '
+import fcntl
+import sys
+with open(sys.argv[1], "a") as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(1)
+' "$dir/.replies.lock"
+then
+  # 동시 요청이 둘 다 probe를 통과해도 수신기 자신의 수명 잠금이 하나만 남긴다.
+  nohup python3 "$here/decision_replies.py" watch --dir "$state_dir" >> "$dir/replies.log" 2>&1 &
+fi
+if [ "$surface" = html ]; then
+  echo "decision-request: opened $mode page for $name"
+else
+  echo "decision-request: opened $mode to-do item for $name ($opened, $surface)"
+fi

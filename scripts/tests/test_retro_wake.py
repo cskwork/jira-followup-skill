@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+from _harness import bound  # noqa: E402  부하에 맞춘 하위 프로세스 한도
+
 ROOT = Path(__file__).resolve().parents[1]
 WAKE = ROOT / "jira-daily-wake"
 GUARD = ROOT / "jira-daily-guard"
@@ -48,11 +50,12 @@ printf '%s\\n' "${GUARD_OUTPUT:-mode=tick}"
         self.env = dict(os.environ, HOME=str(self.home), PATH=f"{binary}:{os.environ['PATH']}",
                         CALLS=str(self.calls), GUARD_ARGS=str(self.home / "guard-args"),
                         JIRA_WAKE_GUARD=str(guard), JIRA_WAKE_CWD=str(self.home),
-                        JIRA_WAKE_DIR=str(self.state), JIRA_WAKE_FOREGROUND="1")
+                        JIRA_WAKE_DIR=str(self.state), JIRA_WAKE_FOREGROUND="1",
+                        JIRA_FACTORY_WORKSPACE="wks_factory")
 
     def wake(self, *args, **env):
         return subprocess.run(["/bin/bash", str(WAKE), *args], env=dict(self.env, **env),
-                              text=True, capture_output=True, timeout=15)
+                              text=True, capture_output=True, timeout=bound(15))
 
     def recorded(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
@@ -68,6 +71,25 @@ printf '%s\\n' "${GUARD_OUTPUT:-mode=tick}"
         self.assertEqual(calls[2], ["agent", "archive", "old-done"])
         self.assertEqual(calls[3][0], "run")
         self.assertIn("archived=2 archive_failed=0", result.stdout)
+
+    def test_settled_run_is_marked_and_not_listed_again(self):
+        agents = [{"id": "old-idle", "status": "idle"}]
+        self.wake("--now", AGENTS=json.dumps(agents))
+        marker = next(self.state.glob("runs/*/archived"))
+        self.assertEqual(marker.parent.name, "finished")
+        self.calls.unlink(missing_ok=True)
+        result = self.wake("--now", AGENTS=json.dumps(agents))
+        self.assertNotIn(["agent", "ls", "--json", "--label", "run=finished"], self.recorded())
+        self.assertIn("archived=0 archive_failed=0", result.stdout)
+
+    def test_running_or_failed_archive_keeps_run_for_next_wake(self):
+        for agents, env in (([{"id": "active", "status": "running"}], {}),
+                            ([{"id": "broken", "status": "idle"}], {"FAIL_ARCHIVE": "broken"})):
+            with self.subTest(agents=agents):
+                for marker in self.state.glob("runs/*/archived"):
+                    marker.unlink()
+                self.wake("--now", AGENTS=json.dumps(agents), **env)
+                self.assertEqual(list(self.state.glob("runs/*/archived")), [])
 
     def test_archive_failure_continues_other_archives_and_launch(self):
         agents = [{"id": "broken", "status": "idle"}, {"id": "finished", "status": "idle"}]
@@ -125,7 +147,7 @@ printf '%s\\n' "${GUARD_OUTPUT:-mode=tick}"
             if "TOKEN" in args:
                 args[-1] = json.loads((self.state / "running.json").read_text())["token"]
             result = subprocess.run(["/bin/bash", str(GUARD), *args], env=self.env,
-                                    text=True, capture_output=True, timeout=10)
+                                    text=True, capture_output=True, timeout=bound(10))
             self.assertEqual(result.returncode, 0, result.stderr)
             if "--manual" in args:
                 self.assertIn("mode=morning", result.stdout)

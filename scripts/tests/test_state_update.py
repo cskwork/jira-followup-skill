@@ -1,6 +1,8 @@
 """공유 상태 직렬화와 실패 시 원본 보존을 오프라인으로 확인한다."""
 
 import json
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -29,6 +31,18 @@ class StateUpdateTests(unittest.TestCase):
                                "--dir", str(self.directory), *args],
                               capture_output=True, text=True, **kwargs)
 
+    def test_empty_or_root_cli_directory_fails_before_patch(self):
+        for value in ('', '/'):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                with patch.object(state, 'patch', return_value={}) as update, \
+                        redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as stopped:
+                        state.main(['--dir', value, 'patch', 'state.json', '--json', '{}'])
+                self.assertEqual(stopped.exception.code, 2)
+                self.assertIn('--dir', stderr.getvalue())
+                update.assert_not_called()
+
     def test_nested_patch_retains_siblings_and_deletes_only_named_keys(self):
         state.atomic_json(self.directory / "state.json", {
             "morning": {"at": "keep"}, "followup": {
@@ -38,6 +52,54 @@ class StateUpdateTests(unittest.TestCase):
         self.assertEqual(self.read("state.json"), {
             "morning": {"at": "keep"}, "followup": {
                 "cursor": "keep", "handled": {"old": {"action": "human"}, "new": {"action": "posted"}}}})
+
+    def test_blank_note_cannot_erase_existing_note(self):
+        state.atomic_json(self.directory / "followup-queue.json", {"PROJ-1": {"note": "원문 기록"}})
+        result = self.cli("patch", "followup-queue.json", "--path", '["PROJ-1"]', "--json", '{"note": ""}')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refusing to blank", result.stderr)
+        self.assertEqual(self.read("followup-queue.json")["PROJ-1"]["note"], "원문 기록")
+        state.patch(self.directory, "followup-queue.json", ["PROJ-1"], {}, delete=["note"])
+        self.assertNotIn("note", self.read("followup-queue.json")["PROJ-1"])
+
+    def test_long_note_keeps_recent_tail_and_moves_head_to_notes_file(self):
+        old = " | ".join(f"[2026-11-0{n % 9 + 1}] 기록 {n} " + "가" * 150 for n in range(60))
+        state.atomic_json(self.directory / "followup-queue.json", {"PROJ-1": {"note": old}, "PROJ-2": {"note": "x" * 9000}})
+        state.patch(self.directory, "followup-queue.json", ["PROJ-1"], {"note": old + " | 새 기록"})
+        queue = self.read("followup-queue.json")
+        note = queue["PROJ-1"]["note"]
+        self.assertLessEqual(len(note), state.NOTE_MAX_CHARS)
+        self.assertTrue(note.startswith(state.note_marker("PROJ-1")))
+        self.assertTrue(note.endswith(" | 새 기록"))
+        moved = (self.directory / "notes" / "PROJ-1.md").read_text()
+        self.assertIn("기록 0 ", moved)
+        # 잘린 기록은 notes 파일과 큐 둘 중 한 곳에 온전히 남는다.
+        for n in range(60):
+            self.assertTrue(f"기록 {n} " in moved or f"기록 {n} " in note, n)
+        self.assertEqual(queue["PROJ-2"]["note"], "x" * 9000)  # 바뀌지 않은 항목은 손대지 않는다
+
+    def test_note_line_cap_and_prepended_entry_moves_to_end(self):
+        old = "\n".join(f"줄 {n}" for n in range(30))
+        state.atomic_json(self.directory / "followup-queue.json", {"PROJ-1": {"note": old}})
+        state.patch(self.directory, "followup-queue.json", ["PROJ-1"], {"note": "[새] 앞에 붙임 | " + old})
+        note = self.read("followup-queue.json")["PROJ-1"]["note"]
+        self.assertLessEqual(note.count("\n") + 1, state.NOTE_MAX_LINES)
+        self.assertTrue(note.endswith("줄 29 | [새] 앞에 붙임"))
+        self.assertIn("줄 0\n", (self.directory / "notes" / "PROJ-1.md").read_text())
+        # 다시 덧붙여도 머리 표식은 하나다.
+        state.patch(self.directory, "followup-queue.json", ["PROJ-1"], {"note": note + " | 다음"})
+        again = self.read("followup-queue.json")["PROJ-1"]["note"]
+        self.assertEqual(again.count(state.note_marker("PROJ-1")), 1)
+        self.assertTrue(again.endswith(" | 다음"))
+
+    def test_guard_transaction_note_append_is_capped_too(self):
+        state.atomic_json(self.directory / "followup-queue.json", {"PROJ-1": {"note": "y" * 5000}})
+        state.transaction(self.directory, "followup-queue.json",
+                          lambda queue: queue["PROJ-1"].update(note=queue["PROJ-1"]["note"] + " | 가드 메모"))
+        note = self.read("followup-queue.json")["PROJ-1"]["note"]
+        self.assertLessEqual(len(note), state.NOTE_MAX_CHARS)
+        self.assertTrue(note.endswith(" | 가드 메모"))
+        self.assertTrue((self.directory / "notes" / "PROJ-1.md").exists())
 
     def test_queue_created_at_backfills_only_changed_items(self):
         state.atomic_json(self.directory / "followup-queue.json", {

@@ -1,0 +1,16 @@
+{
+  "brief": "작업 brief의 목적·입력·산출물 계약이 빠지거나 서로 맞지 않음",
+  "requirements": "요구사항·인수 조건을 빠뜨리거나 다른 조건으로 검증함",
+  "scope": "승인한 작업 범위·권한·대상 경계를 벗어나거나 혼동함",
+  "queue-runnable": "큐의 실행 가능 조건과 실제 실행 여부가 맞지 않음",
+  "next-step-waiting": "nextStep·waiting이 실제 다음 작업이나 막힘과 맞지 않음",
+  "e2e-smoke": "E2E·smoke의 실행 조건이나 실제 동작 증거가 부족함",
+  "check-result": "check-result·verifier JSON의 계약이나 판정 근거가 맞지 않음",
+  "deploy": "Jenkins·stg 배포의 실행·체크아웃·반영 증거를 잘못 판단함",
+  "lost-run": "실행이 유실되거나 잠금·lease 회수와 복구가 맞지 않음",
+  "decision-surface": "결정 화면·질문·답 수신의 연결이나 전달이 실패함",
+  "capacity": "용량·동시 실행 한도·429 제한에 따른 대기나 재시도가 잘못됨",
+  "sdlc-slug": "SDLC slug·작업 경로·실행 식별자가 맞지 않음",
+  "status-hold": "HOLD 상태의 사유·유지·해제 조건을 잘못 처리함",
+  "other": "기존 분류에 속하지 않는 실패로 what 서명에 따라 반복을 구분함"
+}

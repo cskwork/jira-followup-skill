@@ -8,7 +8,10 @@
     "stage",
     "waiting",
     "artifacts",
-    "checks"
+    "checks",
+    "question",
+    "suggest",
+    "humanAction"
   ],
   "properties": {
     "status": {
@@ -43,6 +46,45 @@
         "null"
       ],
       "description": "대기 이유: reporter | human-risk | stg-approval | env-human | env-down, 없으면 null"
+    },
+    "question": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "waiting=human-risk일 때 필수: 사용자가 정할 것 한 문장(한국어 쉬운 말, 파일명·줄 번호·명령·도구 이름·로그 낱말 금지). 그 밖은 null"
+    },
+    "suggest": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "waiting=human-risk일 때 필수: 사용자가 그대로 보내면 공장이 바로 이어갈 수 있는 권장 답 한 줄. 그 밖은 null"
+    },
+    "humanAction": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "line",
+        "runSheet"
+      ],
+      "properties": {
+        "line": {
+          "type": "string",
+          "description": "사람만 할 수 있는 선행 조치 한 줄(비밀값·계정·권한 생성, 서버 설정 주입 등 RUNBOOK §0 밖)"
+        },
+        "runSheet": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "사람이 따라 할 실행지 경로, 없으면 null"
+        }
+      },
+      "description": "waiting=human-risk이고 막힌 것이 사람만 할 수 있는 조치일 때 question·suggest(둘 다 null) 대신 쓴다. 그 밖은 null"
     },
     "artifacts": {
       "type": "array",

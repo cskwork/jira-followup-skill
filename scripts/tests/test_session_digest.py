@@ -113,7 +113,7 @@ class SessionDigestTests(unittest.TestCase):
         self.assertEqual(report.count("command=unknown"), 2)
 
     def test_redaction_before_truncation_in_user_reason_and_command(self):
-        secrets = ["Bearer -fake-bearer-secret", "ghp_abcdefghijklmnopqrstuvwxyz", "sk-abcdefghijklmnop", "xoxb-123456789-secret", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature"]
+        secrets = ["Bearer -fake-bearer-secret", "ghp_abcdefghijklmnopqrstuvwxyz", "sk-abcdefghijklmnop", "xoxe-abcdef-secret", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature"]
         text = " ".join(secrets) + " tail"
         self.write(".claude/projects/p/redact.jsonl", [self.claude(text),
             {"type": "assistant", "timestamp": "2026-10-21T02:00:00Z", "message": {"content": [

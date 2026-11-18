@@ -93,9 +93,11 @@ class ScanRetryRegressionTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         base = Path(tmp.name)
         steps, views = [], 0
+        tick = [0]
 
         def runner(args):
             nonlocal views
+            tick[0] += 1
             if args[0] == 'search':
                 return [{'key': KEY}] if 'updated >=' in args[args.index('--jql') + 1] else []
             self.assertEqual(args[:2], ['view', KEY])
@@ -109,22 +111,29 @@ class ScanRetryRegressionTests(unittest.TestCase):
                                     'body': {'type': 'text', 'text': '확인 요청'}}]}}}
 
         def sleep(seconds):
+            tick[0] += seconds
             steps.append(('sleep', seconds))
 
         with contextlib.redirect_stdout(io.StringIO()):
             scan.main(['--since', '2026-10-22T08:00:00+09:00'], runner=runner,
-                      base=base, workspace=base, sleep=sleep)
+                      base=base, workspace=base, sleep=sleep, clock=lambda: tick[0])
         return json.loads((base / 'followup-scan.json').read_text()), steps
 
     def test_transient_issue_read_failure_retries_after_three_seconds(self):
         output, steps = self.run_scan(1)
         self.assertEqual(steps, ['view', ('sleep', 3), 'view'])
+        self.assertEqual(output['attempts']['view:' + KEY], 2)
+        self.assertGreaterEqual(output['timings']['totalSeconds'], output['timings']['view:' + KEY])
         self.assertEqual(output['errors'], [])
+        self.assertEqual(output['timings']['view:' + KEY],5)
+        self.assertEqual(output['timings']['totalSeconds'],8)
         self.assertEqual([event['commentId'] for event in output['events']], ['1'])
 
     def test_exhausted_issue_read_retry_keeps_existing_error(self):
         output, steps = self.run_scan(2)
         self.assertEqual(steps, ['view', ('sleep', 3), 'view'])
+        self.assertEqual(output['attempts']['view:' + KEY], 2)
+        self.assertGreaterEqual(output['timings']['totalSeconds'], output['timings']['view:' + KEY])
         self.assertEqual(output['errors'], [{'scope': KEY, 'error': 'acli rc=1'}])
         self.assertEqual(output['events'], [])
 

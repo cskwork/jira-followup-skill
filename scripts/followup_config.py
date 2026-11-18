@@ -77,3 +77,45 @@ COMMENT_FORMAT_DIR = Path(os.path.expanduser(get("COMMENT_FORMAT_DIR", "~/.agent
 SDLC_KIT = Path(os.path.expanduser(get("SDLC_KIT", "~/.agents/skills/sdlc-kit")))
 JIRA_REAUTH_HINT = get("JIRA_REAUTH_HINT", "acli jira auth login")
 LINE_TITLE = get("LINE_TITLE", "Jira follow-up line")
+
+# --- Worker runtime, resource locks, factory workspace ---
+# Service repository directory = WORKSPACE/<SERVICE_REPO_PREFIX><service>; `deploy-<service>` resource locks need it.
+SERVICE_REPO_PREFIX = get("SERVICE_REPO_PREFIX", "")
+# Per-ticket orchestrator agent started by jira-ticket-run.
+TICKET_ORCHESTRATOR_PROVIDER = get("TICKET_ORCHESTRATOR_PROVIDER", "claude")
+TICKET_ORCHESTRATOR_MODEL = get("TICKET_ORCHESTRATOR_MODEL", "claude-opus-5-5")
+TICKET_ORCHESTRATOR_THINKING = get("TICKET_ORCHESTRATOR_THINKING", "high")
+TICKET_ORCHESTRATOR_MODE = get("TICKET_ORCHESTRATOR_MODE", "bypassPermissions")
+
+# --- Decisions, chat room, judge ---
+# Teams room watcher (teams_room.py). Empty room = watcher off (scan reports configured=false).
+TEAMS_ROOM_CHAT_ID = get("TEAMS_ROOM_CHAT_ID", "")
+TEAMS_ROOM_NAME = get("TEAMS_ROOM_NAME", "Teams room")
+TEAMS_ME_MRI = get("TEAMS_ME_MRI", "")
+TEAMS_ME_NAME = get("TEAMS_ME_NAME", "")
+TEAMS_ME_NAMES = get_list("TEAMS_ME_NAMES", "")
+TEAMS_SELF_CHAT_ID = get("TEAMS_SELF_CHAT_ID", "48:notes")
+# Jira status a reporter moves a ticket to after checking dev (judge.py stg rule)
+STATUS_DEV_DONE = get("STATUS_DEV_DONE", "개발 검수 완료")
+# Judge agent (judge.py): a claude-CLI-compatible command, model and effort
+JUDGE_PROVIDER = get("JUDGE_PROVIDER", "claude")
+JUDGE_MODEL = get("JUDGE_MODEL", "claude-opus-5-5")
+JUDGE_THINKING = get("JUDGE_THINKING", "medium")
+
+# --- Morning check, kube, sdlc dreamer ---
+# Morning check moves a ticket automatically only from this status (or later) to STATUS_ON_PROD;
+# empty = the fifth STATUS_ORDER entry.
+STATUS_QA_DONE = get("STATUS_QA_DONE") or STATUS_ORDER[min(4, len(STATUS_ORDER) - 1)]
+# Repository whose origin/retro/* proposal branches the morning check lists (default: this skill repo).
+RETRO_REPO = Path(os.path.expanduser(get("RETRO_REPO", str(SKILL_DIR))))
+# Recovery hint shown when the chat-room watcher has been failing for over 24 hours.
+CHAT_RECONNECT_HINT = get("CHAT_RECONNECT_HINT", "<채팅 CLI 스킬> connect")
+# kube_pods.py: `<KUBE_CONNECT_CMD> <host> "<kubectl ...>"`; empty = kube checks not configured (SKIP).
+KUBE_CONNECT_CMD = get("KUBE_CONNECT_CMD", "")
+KUBE_HOST_DEV = get("KUBE_HOST_DEV", "dev")
+KUBE_HOST_STG = get("KUBE_HOST_STG", "stg")
+# dream_tick.py: the sdlc memory dreamer agent.
+DREAM_PROVIDER = get("DREAM_PROVIDER", "claude")
+DREAM_MODEL = get("DREAM_MODEL", "claude-opus-5-5")
+DREAM_THINKING = get("DREAM_THINKING", "medium")
+DREAM_MODE = get("DREAM_MODE", "bypassPermissions")

@@ -4,10 +4,24 @@ set -u
 key=$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')
 [[ "$key" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] || { echo "usage: stg-approval-request <KEY>" >&2; exit 3; }
 here=$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().parent)' "$0")
+# 공장 일시정지(hold.json)가 이 티켓이나 stg 단계를 막으면 승인 항목을 만들지 않는다. 큐 waiting은 그대로 둔다.
+python3 "$here/factory_hold.py" check --key "$key" --stage stg || {
+  code=$?
+  echo "stg-approval-request: blocked by factory hold (exit=$code); approval page not opened" >&2
+  exit 5
+}
 python3 "$here/check_migrations.py" --key "$key"
 code=$?
 if [ "$code" -ne 0 ]; then
   echo "stg-approval-request: waiting=human-risk (migration check exit=$code); approval page blocked" >&2
   exit "$code"
 fi
+# 판정 에이전트(사용자 결정 2026-11-09): Jira '개발 검수 완료' 전환 또는 QA 확인 댓글이면 승인,
+# 아니면 보고자에게 상태 전환을 요청하는 댓글을 달고 waiting=reporter로 기다린다(exit 11). 그 밖은 사람 승인 항목.
+python3 "$here/judge.py" stg "$key"
+code=$?
+case "$code" in
+  0) echo "stg-approval-request: approved by judge (see ${JIRA_WAKE_DIR:-${JIRA_FOLLOWUP_HOME:-$HOME/.jira-followup}}/judge.jsonl)"; exit 0 ;;
+  11) echo "stg-approval-request: waiting=reporter (judge asked the reporter to move the ticket to the dev-verified status)" >&2; exit 11 ;;
+esac
 exec /bin/bash "$here/decision-request" stg-approval "$key"

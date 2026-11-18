@@ -13,6 +13,18 @@ teams-drafts/
 decision-pages/
 runs/
 logs/
+running.json
+guard-*.json
+judge-state.json
+dream-last.json
+scan-state.json
+followup-scan.json
+pending-focus.jsonl
+factory-workspace
+morning/
+tickets/
+lanes/
+locks/
 *.token
 .env*
 

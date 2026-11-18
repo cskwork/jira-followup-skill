@@ -1,0 +1,5 @@
+#!/bin/bash
+# 공장 일시정지(hold.json) 설정·해제·확인: jira-factory-hold set|clear|status|check ...
+set -u
+here=$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().parent)' "$0")
+exec python3 "$here/factory_hold.py" "$@"

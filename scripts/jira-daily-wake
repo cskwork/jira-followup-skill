@@ -27,15 +27,16 @@ guard_args=() focus="" trigger=tick
 while [ $# -gt 0 ]; do
   case "$1" in
     --now) guard_args+=(--manual); trigger=manual ;;
+    --refill) guard_args+=(--refill); trigger=refill ;;
     --dir) shift; [ -n "${1:-}" ] || { echo "jira-daily-wake: --dir needs a path" >&2; exit 2; }
            export JIRA_WAKE_DIR="$1" ;;
     --key) shift; focus=${1:-}
            [[ "$focus" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] || { echo "jira-daily-wake: --key needs PROJ-NNN" >&2; exit 2; } ;;
-    *) echo "usage: jira-daily-wake [--now] [--key PROJ-NNN] [--dir PATH]" >&2; exit 2 ;;
+    *) echo "usage: jira-daily-wake [--now|--refill] [--key PROJ-NNN] [--dir PATH]" >&2; exit 2 ;;
   esac
   shift
 done
-[ -n "$focus" ] && [ "$trigger" = tick ] && { echo "jira-daily-wake: --key requires --now" >&2; exit 2; }
+[ -n "$focus" ] && [ "$trigger" != manual ] && { echo "jira-daily-wake: --key requires --now" >&2; exit 2; }
 state_dir="${JIRA_WAKE_DIR:-$JIRA_FOLLOWUP_HOME}"
 state_args=()
 [ -n "${JIRA_WAKE_DIR:-}" ] && state_args=(--dir "$state_dir")
@@ -47,6 +48,18 @@ if [ "$trigger" = tick ] && [ "${JIRA_WAKE_CHILD:-}" != 1 ]; then
   [ "${JIRA_WAKE_FOREGROUND:-}" = 1 ] && exec python3 "$here/wake_supervisor.py" run "$0"
   exec python3 "$here/wake_supervisor.py" detach "$0"
 fi
+# refill은 끝나 가는 티켓 오케스트레이터 세션이 부른다. 그 세션이 끝나면 셸이 가드가 잠금을 잡은 뒤·오케스트레이터를
+# 띄우기 전에 죽어 잠금만 남고, 다음 가드가 lost-run으로 회수했다(2026-11-02~09 11건, task 출력 [killed]·exit 144).
+# tick 장부(ticks.log)는 건드리지 않고 같은 방식으로 세션 밖으로 떼어 낸다.
+if [ "$trigger" = refill ] && [ "${JIRA_WAKE_CHILD:-}" != 1 ] && [ "${JIRA_WAKE_FOREGROUND:-}" != 1 ]; then
+  exec python3 "$here/wake_supervisor.py" spawn "$0" --refill
+fi
+
+# 할 일 결정(decision-surface가 html이 아님)의 답글 수신기가 재부팅 등으로 꺼졌으면 다시 띄운다. 이미 돌면 바로 끝난다.
+if [ "${JIRA_WAKE_DRY_RUN:-}" != 1 ] && [ "$(python3 "$here/decision_inbox.py" surface --dir "$state_dir" 2>/dev/null)" != html ]; then
+  mkdir -p "$state_dir/decision-pages"
+  nohup python3 "$here/decision_replies.py" watch --dir "$state_dir" >> "$state_dir/decision-pages/replies.log" 2>&1 &
+fi
 
 out=$(/bin/bash "$guard" ${guard_args[@]+"${guard_args[@]}"}) || exit $?
 printf '%s\n' "$out"
@@ -54,6 +67,18 @@ case "$out" in *"skipping duplicate"*)
   # 잠금 때문에 미룬 수동 요청은 다음 가드가 반드시 다시 깨운다.
   if [ -n "$focus" ] && [[ "$out" == *"(running)"* ]]; then
     python3 "$here/state_update.py" --dir "$state_dir" append-pending --json "{\"key\":\"$focus\",\"trigger\":\"$trigger\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || exit $?
+  fi
+  # idle tick 끝: sdlc 메모리 정리(dream_tick.py, 하루 한 번·<state_dir>/dream=off면 끔). 가드 판정·종료 코드와 무관하다.
+  # 평소엔 떼어 내 tick을 늦추지 않고, 시험(FOREGROUND)·dry-run은 기다리거나 건너뛴다.
+  # Teams 같은 감시 하나가 안 돼도(monitoring-unavailable) 가드는 할 일 없음으로 판정한 것이다. 2026-11-02부터 Teams 읽기가
+  # 매 tick 실패해 idle만 보면 dreaming이 한 번도 돌지 않았다(2026-11-17 08:00~09:00 tick 3회).
+  if [ "$trigger" = tick ] && [[ "$out" == *"skipping duplicate (idle:"* || "$out" == *"skipping duplicate (monitoring-unavailable:"* ]] \
+     && [ "${JIRA_WAKE_DRY_RUN:-}" != 1 ]; then
+    if [ "${JIRA_WAKE_FOREGROUND:-}" = 1 ]; then
+      python3 "$here/dream_tick.py" --dir "$state_dir" || true
+    else
+      nohup python3 "$here/dream_tick.py" --dir "$state_dir" >> "$state_dir/dream.log" 2>&1 < /dev/null &
+    fi
   fi
   exit 0 ;;
 esac
@@ -67,7 +92,7 @@ if [ "$mode" != "morning" ] && [ "$mode" != "tick" ]; then
   exit 1
 fi
 
-guard_reasons=$(python3 - "$state_dir/guard-last.json" <<'PY'
+guard_reasons=$(python3 -c '
 import json
 from pathlib import Path
 import sys
@@ -76,16 +101,34 @@ try:
     print(",".join(reason for reason in reasons if isinstance(reason, str)))
 except (OSError, ValueError, AttributeError, TypeError):
     print("")
-PY
+' "$state_dir/guard-last.json"
 )
 state_json=$(python3 -c 'import json, sys; from pathlib import Path; print(json.dumps(str(Path(sys.argv[1]).resolve())))' "$state_dir")
 prompt="You are the Jira follow-up factory orchestrator. mode=$mode run_token=$token trigger=$trigger${focus:+ focus=$focus} guard_reasons=$guard_reasons state_dir=$state_json. Read $skill/ORCHESTRATOR.md and follow it exactly. Use state_dir for state, worker briefs, logs, and guard --dir and --token when releasing the lock. Pass --dir $state_json --token $token to every jira-worker call. Your own role is minimal: decide, delegate with jira-worker, check the verifier results, report the whole picture, then release the lock."
+if ! lesson_index=$(python3 "$here/lesson_prompt.py" --dir "$state_dir"); then
+  lesson_index=""
+  echo "jira-daily-wake: lesson index failed; launching without lesson index" >&2
+fi
+[ -n "$lesson_index" ] && prompt="$prompt
+
+$lesson_index"
+# 보관된 실행이 workspace를 남기지 않도록 팩토리 고정 workspace에서 띄운다(실패하면 예전처럼 새 workspace).
+# dry-run은 Paseo를 건드리지 않는다.
+workspace_args=()
+if [ "${JIRA_WAKE_DRY_RUN:-}" != "1" ]; then
+  paseo_workspace=$(python3 "$here/factory_workspace.py" --dir "$state_dir" --path "$workspace")
+  [ -n "$paseo_workspace" ] && workspace_args=(--workspace "$paseo_workspace")
+fi
 # PASEO_AGENT_ID·PASEO_WORKSPACE_ID를 빼야 스케줄 실행 에이전트의 자식이 되지 않는다.
 # 자식이면 스케줄이 끝나 실행 에이전트를 보관할 때 오케스트레이터도 함께 보관된다(실측: 매번 3~5초 만에 종료).
-cmd=(env -u PASEO_AGENT_ID -u PASEO_WORKSPACE_ID
+# JIRA_WAKE_CHILD도 뺀다: 오케스트레이터가 물려받으면 그 아래 티켓 오케스트레이터의 refill이 세션 밖으로 떼어지지 않는다.
+# 무인 최소 환경(factory_env.py, <state_dir>/min-env=off면 예전 그대로).
+min_env_args=()
+while IFS= read -r arg; do min_env_args+=("$arg"); done < <(python3 "$here/factory_env.py" paseo-args --dir "$state_dir")
+cmd=(env -u PASEO_AGENT_ID -u PASEO_WORKSPACE_ID -u JIRA_WAKE_CHILD
      "${PASEO_BIN:-paseo}" run --no-wait --provider "${ORCHESTRATOR_PROVIDER:-claude}" --model "${ORCHESTRATOR_MODEL:-claude-opus-5-5}"
-     --thinking "${ORCHESTRATOR_THINKING:-high}"
-     --mode "${ORCHESTRATOR_MODE:-bypassPermissions}" --cwd "$workspace" --title "Jira orchestrator $mode $(date +%H:%M)"
+     --thinking "${ORCHESTRATOR_THINKING:-high}" --mode "${ORCHESTRATOR_MODE:-bypassPermissions}"
+     ${min_env_args[@]+"${min_env_args[@]}"} --cwd "$workspace" ${workspace_args[@]+"${workspace_args[@]}"} --title "Jira orchestrator $mode $(date +%H:%M)"
      --label factory=jira-followup --label role=orchestrator --label run="$token" -q "$prompt")
 
 if [ "${JIRA_WAKE_DRY_RUN:-}" = "1" ]; then

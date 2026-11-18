@@ -109,23 +109,31 @@ def run(wake):
     return code
 
 
-def detach(wake):
+def detach(wake, argv=None, env=None):
     logs = ROOT / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log = logs / f"wake-{dt.datetime.now(KST):%Y%m%d}.log"
     with log.open("a") as output:
-        child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "run", wake],
+        child = subprocess.Popen(argv or [sys.executable, str(Path(__file__).resolve()), "run", wake],
                                  stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                                 start_new_session=True, close_fds=True)
+                                 start_new_session=True, close_fds=True, env=env)
     print(f"wake=detached pid={child.pid} log={log}")
     return 0
 
 
+def spawn(wake, args):
+    """tick 장부 없이 wake를 세션 밖에서 실행한다(refill: 부른 티켓 오케스트레이터가 끝나도 죽지 않게)."""
+    return detach(wake, ["/bin/bash", wake, *args], dict(os.environ, JIRA_WAKE_CHILD="1"))
+
+
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("run", "detach"):
-        print("usage: wake_supervisor.py run|detach <jira-daily-wake path>", file=sys.stderr)
+    if len(argv) < 3 or argv[1] not in ("run", "detach", "spawn") or (argv[1] != "spawn" and len(argv) != 3):
+        print("usage: wake_supervisor.py run|detach <jira-daily-wake path> | spawn <wake> [args...]",
+              file=sys.stderr)
         return 2
     wake = str(Path(argv[2]).resolve())
+    if argv[1] == "spawn":
+        return spawn(wake, argv[3:])
     return run(wake) if argv[1] == "run" else detach(wake)
 
 

@@ -12,7 +12,8 @@ jira-comment-format (scripts/dev_note.py):
   DEV_NOTE_SPACE      project/space key for the items
   DEV_NOTE_WORKSPACE  (optional) stop unless `whoami` organization.id matches
   DEV_NOTE_LOGIN_HINT (optional) command shown when the session expired (401)
-Final stdout line: `devnote=ok item=<ITEM> created|updated|unchanged` or `devnote=BLOCKED <reason>` (exit 3).
+Final stdout line: `devnote=ok item=<ITEM> created|updated|unchanged`, `devnote=skipped <login hint>` when the
+board session expired (exit 0, the morning check is not blocked), or `devnote=BLOCKED <reason>` (exit 3).
 """
 import argparse
 import datetime
@@ -39,12 +40,16 @@ def cli():
     return ([sys.executable, path] if path.endswith(".py") else [path]) + ["--base", cfg.get("DEV_NOTE_BASE")]
 
 
+class SessionExpired(Blocked):
+    """노트 보드 로그인 만료. 기록만 건너뛰고 호출한 작업은 막지 않는다(2026-11-03 사용자 지시)."""
+
+
 def note(*args, stdin=None):
     p = subprocess.run(cli() + list(args), input=stdin, capture_output=True, text=True, timeout=120)
     if p.returncode != 0:
         err = ((p.stderr or p.stdout).strip().splitlines() or ["unknown"])[-1]
-        if "401" in err:
-            raise Blocked("노트 보드 세션 만료(401): %s" % cfg.get("DEV_NOTE_LOGIN_HINT", "보드 CLI로 다시 로그인"))
+        if "401" in err or "No current CLI session" in err:
+            raise SessionExpired("노트 보드 세션 만료: %s" % cfg.get("DEV_NOTE_LOGIN_HINT", "보드 CLI로 다시 로그인"))
         raise RuntimeError("devnote %s failed: %s" % (" ".join(args[:2]), err))
     out = p.stdout.strip()
     return json.loads(out) if out[:1] in "[{" else out
@@ -99,6 +104,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     try:
         main(args.date, args.dir)
+    except SessionExpired as e:
+        print("devnote=skipped %s" % e)
     except Blocked as e:
         print("devnote=BLOCKED %s" % e)
         sys.exit(3)

@@ -2,7 +2,7 @@
 """Verify a completed Jenkins run against a commit already in a local repository.
 
 Usage: check_deploy.py --job JOB --build NUMBER --repo DIR --expect COMMIT_OR_REF
-                       [--context dev] [--run-json FILE] [--serving-json FILE]
+                       [--context dev] [--key KEY] [--run-json FILE] [--serving-json FILE]
 Exit codes: 0 PASS; 1 deployment check FAIL; 2 usage, tool, JSON, or Git error.
 The installed `jk --help` and `jk run view --help` were checked: --context/-c
 is a global flag (JK_CONTEXT is its environment fallback). The supported read
@@ -16,6 +16,8 @@ the serving check nor --run-json performs network calls. A serving PASS requires
 a current, available rollout and commit-bearing image tags matching --expect.
 Mutable tags such as latest and unrecognized tag formats report unknown, never
 commit proof. A saved Deployment alone cannot establish ingress routing.
+The report echoes job, build, context and (with --key) key so a requirements
+environment binding can name any of them.
 """
 
 import argparse
@@ -218,7 +220,7 @@ def check_serving(args, report, runner):
 
 
 def main(argv=None, command_runner=None):
-    report = {'check': 'deploy', 'status': 'FAIL', 'job': None, 'build': None,
+    report = {'check': 'deploy', 'status': 'FAIL', 'key': None, 'job': None, 'build': None, 'context': None,
               'result': None, 'checkout_commit': None, 'expect': None,
               'expect_sha': None, 'contains_expect': False, 'reason': None}
     parser = Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -227,13 +229,14 @@ def main(argv=None, command_runner=None):
     parser.add_argument('--repo', required=True)
     parser.add_argument('--expect', required=True)
     parser.add_argument('--context', default='dev')
+    parser.add_argument('--key', help='ticket key echoed into the report')
     parser.add_argument('--run-json')
     parser.add_argument('--serving-json', help='saved kubectl get deploy -o json; no kubectl is invoked')
     runner = command_runner or run_command
     args = None
     try:
         args = parser.parse_args(argv)
-        report.update(job=args.job, build=args.build, expect=args.expect)
+        report.update(key=args.key, job=args.job, build=args.build, context=args.context, expect=args.expect)
         if not all(value.strip() for value in (args.job, args.repo, args.expect, args.context)):
             raise CheckError('usage-error')
         code, reason = check(args, report, runner)

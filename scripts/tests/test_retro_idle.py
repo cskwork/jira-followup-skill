@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import followup_idle as idle
 
 
-class RetroIdleTests(unittest.TestCase):
+class IdleFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -49,6 +49,7 @@ class RetroIdleTests(unittest.TestCase):
         self.queue({'PROJ-1389': {'waiting': 'env-human', 'stage': 'tobe',
                                 'needs': 'dev-db,jira,jenkins-dev'}})
 
+class RetroIdleTests(IdleFixture):
     def test_1i_normalization_is_persisted_and_guard_last_saved(self):
         self.local_queue()
         result, code = self.decide()
@@ -102,7 +103,7 @@ class RetroIdleTests(unittest.TestCase):
         self.assertIn('PROJ-0, PROJ-1, PROJ-2', self.notifications[0][-1])
         self.decide()
         self.assertEqual(len(self.notifications), 1)
-        self.action = 'VPN audit 연결(OTP)'
+        self.action = 'VPN stg 연결(OTP)'
         self.decide()
         self.assertEqual(len(self.notifications), 2)
         state = json.loads((self.directory / 'guard-state.json').read_text())
@@ -147,3 +148,97 @@ class RetroIdleTests(unittest.TestCase):
         self.assertIn('scan-failed', result['reasons'])
         self.assertIn('stuck-runnable:PROJ-1389', result['reasons'])
         self.assertEqual(json.loads((self.directory / 'guard-last.json').read_text()), result)
+
+
+class ScanAccountingTests(IdleFixture):
+    """A tick that dies inside the scan must be counted, and a streak must reach a human."""
+
+    def health(self):
+        return json.loads((self.directory / 'scan-state.json').read_text())
+
+    def fail_scan(self):
+        original = self.run_command
+
+        def failure(argv):
+            result = original(argv)
+            if argv[0] == 'scan-stub':
+                result.returncode = 1
+            return result
+        return patch.object(idle, 'run', side_effect=failure)
+
+    def test_healthy_scan_records_success_and_clears_the_attempt_marker(self):
+        result, code = self.decide()
+        self.assertEqual(code, 0)
+        health = self.health()
+        self.assertEqual((health['failureCount'], health['lastError']), (0, None))
+        self.assertIsNone(health['attemptStartedAt'])
+        self.assertIsNotNone(health['lastSuccessAt'])
+        self.assertEqual(result['monitoring']['jira']['failureCount'], 0)
+
+    def test_tick_killed_inside_the_scan_is_counted_by_the_next_tick(self):
+        (self.directory / 'scan-state.json').write_text(json.dumps(
+            {'attemptStartedAt': '2026-10-29T09:00:00+09:00', 'failureCount': 0}))
+        result, code = self.decide()
+        self.assertIn('scan-interrupted', result['reasons'])
+        self.assertEqual(result['monitoringStatus'], 'degraded')
+        # The scan still runs: an interrupted tick never skips this tick's Jira read.
+        self.assertTrue(any(argv[0] == 'scan-stub' for argv in self.calls))
+        self.assertEqual(self.health()['failureCount'], 0)
+        self.assertIsNone(self.health()['attemptStartedAt'])
+
+    def test_failure_streak_notifies_once_and_a_healthy_scan_clears_it(self):
+        with self.fail_scan():
+            for _ in range(2):
+                self.decide()
+            self.assertEqual(self.notifications, [])
+            result, code = self.decide()
+        self.assertEqual(code, 1)
+        self.assertEqual(result['scanAlert'], 'sent')
+        self.assertEqual(len(self.notifications), 1)
+        self.assertIn('3회 연속 실패', self.notifications[0][-1])
+        health = self.health()
+        self.assertEqual((health['failureCount'], health['lastError'], health['alerted']),
+                         (3, 'scan-failed', True))
+        with self.fail_scan():
+            self.decide()
+        self.assertEqual(len(self.notifications), 1)
+        self.decide()
+        health = self.health()
+        self.assertEqual((health['failureCount'], health['alerted']), (0, False))
+
+    def test_reported_scan_errors_count_without_hiding_the_reason(self):
+        original = self.run_command
+
+        def errored(argv):
+            if argv[0] == 'scan-stub':
+                Path(argv[argv.index('--out') + 1]).write_text(
+                    json.dumps({'events': [], 'errors': ['jira-5xx']}))
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+            return original(argv)
+        with patch.object(idle, 'run', side_effect=errored):
+            result, code = self.decide()
+        self.assertEqual(code, 1)
+        self.assertIn('scan-errors', result['reasons'])
+        self.assertEqual(self.health()['lastError'], 'scan-errors')
+
+    def test_malformed_payload_is_counted_as_malformed_not_as_an_interruption(self):
+        original = self.run_command
+
+        def broken(argv):
+            if argv[0] == 'scan-stub':
+                Path(argv[argv.index('--out') + 1]).write_text(json.dumps({'events': 'no'}))
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+            return original(argv)
+        with patch.object(idle, 'run', side_effect=broken):
+            result, code = self.decide()
+        self.assertEqual(code, 2)
+        self.assertIn('internal-error', result['reasons'])
+        health = self.health()
+        self.assertEqual((health['failureCount'], health['lastError']), (1, 'scan-malformed'))
+        self.assertIsNone(health['attemptStartedAt'])
+
+    def test_invalid_saved_failure_count_is_an_internal_error(self):
+        (self.directory / 'scan-state.json').write_text(json.dumps({'failureCount': -1}))
+        result, code = self.decide()
+        self.assertEqual(code, 2)
+        self.assertIn('internal-error', result['reasons'])

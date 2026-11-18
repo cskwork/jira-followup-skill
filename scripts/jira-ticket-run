@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""예약된 티켓 오케스트레이터 하나를 팩토리 workspace에서 분리 실행한다."""
+import argparse
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+import factory_env
+import factory_workspace
+import followup_config as cfg
+import lesson_prompt
+import run_lock
+from state_update import directory_argument
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dir', type=directory_argument, required=True)
+    parser.add_argument('--key', required=True)
+    parser.add_argument('--token', type=run_lock.token_argument, required=True)
+    parser.add_argument('--parent', type=run_lock.token_argument, required=True)
+    args = parser.parse_args(argv)
+    directory = args.dir.expanduser()
+    here = Path(__file__).resolve().parent
+    workspace_dir = os.environ.get('JIRA_WAKE_CWD') or str(cfg.WORKSPACE)
+    dry_run = os.environ.get('JIRA_WAKE_DRY_RUN') == '1'
+    try:
+        # 기존 launcher처럼 workspace 조회 실패는 명시하고 cwd 경로로 돌아간다.
+        workspace = (os.environ.get('JIRA_FACTORY_WORKSPACE', '') if dry_run
+                     else factory_workspace.lookup(directory, Path(workspace_dir)))
+        prompt = (f'Read {here.parent / "TICKET-ORCHESTRATOR.md"} and follow it exactly. '
+                  f'key={args.key} tt={args.token} parent={args.parent} '
+                  f'state_dir={json.dumps(str(directory.resolve()))}.')
+        lesson_index = lesson_prompt.block(directory)
+        if lesson_index:
+            prompt += '\n\n' + lesson_index
+        command = ['env', '-u', 'PASEO_AGENT_ID', '-u', 'PASEO_WORKSPACE_ID',
+                   cfg.get('PASEO_BIN', 'paseo'), 'run', '--no-wait',
+                   '--provider', cfg.TICKET_ORCHESTRATOR_PROVIDER, '--model', cfg.TICKET_ORCHESTRATOR_MODEL,
+                   '--thinking', cfg.TICKET_ORCHESTRATOR_THINKING, '--mode', cfg.TICKET_ORCHESTRATOR_MODE,
+                   '--cwd', workspace_dir]
+        command += factory_env.paseo_args(directory)
+        if workspace:
+            command += ['--workspace', workspace]
+        command += ['--title', 'Jira ticket orchestrator ' + args.key,
+                    '--label', 'factory=jira-followup', '--label', 'role=ticket-orchestrator',
+                    '--label', 'run=' + args.token, '--label', 'key=' + args.key, '-q', prompt]
+        # launch 예약이 회수되는 동안 늦게 새 에이전트를 만들지 않도록 같은 잠금에서 시작한다.
+        with run_lock.locked(directory):
+            if not run_lock.owns_ticket(directory, args.token, args.key):
+                raise PermissionError('ticket ownership lost')
+            lease = json.loads((directory / 'tickets' / (args.key + '.json')).read_text())
+            if lease.get('parent') != args.parent or lease.get('state') != 'launching':
+                raise PermissionError('ticket launch reservation does not match')
+            if dry_run:
+                print('dry-run: ' + shlex.join(command))
+                return 0
+            result = subprocess.run(command, text=True, capture_output=True, timeout=60, check=True)
+            identity = result.stdout.strip()
+            if not run_lock.valid_token(identity):
+                raise ValueError('launcher returned invalid agent id')
+            print(identity)
+        return 0
+    except PermissionError as error:
+        print('jira-ticket-run: ' + str(error), file=sys.stderr)
+        return 3
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print('jira-ticket-run: ' + str(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

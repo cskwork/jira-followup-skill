@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check evidence prerequisites without changing VPN, auth, or Jenkins state.
 
-Usage: preflight_env.py --need dev-db,stg-db,dev-ai,stg-ai,dev-web,stg-web,jira,jenkins-dev
+Usage: preflight_env.py --need dev-db,stg-db,dev-ai,stg-ai,dev-web,stg-web,stg-kube,dev-kube,jira,jenkins-dev
                         [--timeout 20] [--fail-fast]
 Exit codes: 0 all PASS, 10 HUMAN (VPN/OTP/auth/setup), 20 DOWN (service),
 2 invalid usage. Output is one JSON object; --help prints CLI help instead.
@@ -32,30 +32,43 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-import followup_config as cfg
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import followup_config as cfg  # noqa: E402
+import kube_pods  # noqa: E402
+import lifecycle  # noqa: E402
 
-NEEDS = ("dev-db", "stg-db", "dev-ai", "stg-ai", "dev-web", "stg-web", "jira", "jenkins-dev")
+NEEDS = ("dev-db", "stg-db", "dev-ai", "stg-ai", "dev-web", "stg-web", "stg-kube", "dev-kube", "jira", "jenkins-dev")
 PROFILES = ("dev", "stg")
 JK_TIMEOUT = 120
 
 
-def next_step_item(item):
-    """큐 쓰기는 호출자가 한다. 과거 needs나 note에서 다음 동작을 추측하지 않는다."""
+def next_step_item(item, phase=None):
+    """큐 쓰기는 호출자가 한다. 과거 needs나 note에서 다음 동작을 추측하지 않는다.
+
+    phase는 sdlc 단계(`sdlc.sh status`)다. 없으면(slug 없음·sdlc 오류) 옛 stage에서 끌어낸다(lifecycle.legacy_phase).
+    원인 확정: sdlc plan·build·evidence(옛 plan·build·tobe·evidence), 배포 직전 deliver(옛 dev-deploy),
+    또는 delivery dev-deployed·dev-verified(옛 dev-deployed·dev-smoke·dev-e2e). 기본 nextStep=local은
+    아직 배포 전(delivery none)이고 sdlc가 plan·build·evidence일 때다.
+    """
     if not isinstance(item, dict):
         raise ValueError("invalid queue item")
     result = dict(item)
-    established = item.get("causeEstablished") is True or item.get("stage") in (
-        "plan", "build", "tobe", "evidence", "dev-deploy", "dev-e2e", "dev-smoke", "dev-deployed",
-    )
+    phase = phase or lifecycle.legacy_phase(item.get("stage"))
+    delivery = lifecycle.delivery(item)
+    established = (item.get("causeEstablished") is True
+                   or delivery in (None, "none") and phase in ("plan", "build", "evidence", "deliver")
+                   or delivery in ("dev-deployed", "dev-verified"))
     step = item.get("nextStep")
-    if step is None and item.get("stage") in ("plan", "build", "tobe", "evidence"):
+    if step is None and delivery in (None, "none") and phase in ("plan", "build", "evidence"):
         step = "local"
     if step is None:
         return result
     if not isinstance(step, str):
         raise ValueError("invalid nextStep")
     needs = {"local": "", "reproduce-web": "dev-web", "dev-deploy": "jenkins-dev",
-             "dev-e2e": "dev-web", "jira": "jira"}
+             "dev-e2e": "dev-web", "jira": "jira",
+             "stg-smoke": "stg-web,stg-kube", "stg-e2e": "stg-web,stg-kube",
+             "stg-comment-prep": "stg-kube"}
     if step == "reproduce-db":
         profile = item.get("profile")
         if profile not in PROFILES:
@@ -169,7 +182,7 @@ def check_environment(needs, timeout=20, *, command=run_command, http=http_statu
            "ok" if vpn_ok else error or ("vpn-conflict" if len(connected) > 1 else "invalid-vpn-status"),
            None if vpn_ok else "Check vpn status; connect only the dev or stg VPN using Terminal and OTP.")
     # Public checks still record VPN diagnostics, but do not depend on its CLI or OTP.
-    results[-1]["required"] = any(name.endswith(("-db", "-ai")) for name in needs)
+    results[-1]["required"] = any(name.endswith(("-db", "-ai", "-kube")) for name in needs)
 
     # Always check VPN first; preserve the caller's order for requested checks.
     for name in needs:
@@ -177,7 +190,16 @@ def check_environment(needs, timeout=20, *, command=run_command, http=http_statu
             results.append({"name": name, "status": "SKIP", "observed": None,
                             "human_action": None, "reason": "fail-fast"})
             continue
-        if name.endswith("-db"):
+        if name.endswith("-kube"):
+            profile = name.split("-")[0]
+            if VPN_STATUS_CMD != "none" and (not vpn_ok or vpn != profile):
+                failure = kube_pods.failure("vpn", profile)
+                record(name, False, None, failure["reason"], failure["hint"])
+                continue
+            result = kube_pods.probe(profile, timeout, command=command)
+            ok = result["status"] == "PASS"
+            record(name, ok, len(result["pods"]) if ok else None, result["reason"], result["hint"])
+        elif name.endswith("-db"):
             profile = name.split("-")[0]
             if VPN_STATUS_CMD != "none" and (not vpn_ok or vpn != profile):
                 record(name, False, None, "wrong-vpn", vpn_action(profile))
@@ -260,7 +282,14 @@ def main(argv=None, *, command=run_command, http=http_status):
     args = parser.parse_args(argv)
     if args.queue_item is not None:
         try:
-            item = next_step_item(json.loads(args.queue_item.expanduser().read_text(encoding="utf-8")))
+            item = json.loads(args.queue_item.expanduser().read_text(encoding="utf-8"))
+            phase = None
+            if isinstance(item, dict) and item.get("slug"):
+                try:
+                    phase = (lifecycle.Sdlc().status(item["slug"]) or {}).get("phase")
+                except lifecycle.SdlcError:
+                    phase = None  # sdlc를 못 읽으면 옛 stage로 본다.
+            item = next_step_item(item, phase=phase)
         except (OSError, ValueError, TypeError):
             parser.error("invalid queue item")
         print(json.dumps({"check": "needs", "item": item}, ensure_ascii=False))

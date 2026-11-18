@@ -10,9 +10,15 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
+
+from _harness import bound  # noqa: E402  부하에 맞춘 하위 프로세스 한도
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import followup_idle as idle
 IDLE = ROOT / "followup_idle.py"
 GUARD = ROOT / "jira-daily-guard"
 IDLE_MESSAGE = "jira-daily-guard: skipping duplicate (idle: events=0, no runnable work)"
@@ -29,6 +35,7 @@ parser.add_argument("calls")
 parser.add_argument("message", nargs="?")
 parser.add_argument("--out")
 parser.add_argument("--need")
+parser.add_argument("--dir")
 parser.add_argument("--fail-fast", action="store_true")
 args = parser.parse_args()
 config = json.loads(Path(args.config).read_text())
@@ -37,6 +44,8 @@ with Path(args.calls).open("a") as output:
 if args.kind == "scan" and args.out and not config.get("skip_write"):
     payload = config.get("scan", {"events": [], "errors": []})
     Path(args.out).write_text(payload if isinstance(payload, str) else json.dumps(payload))
+if args.kind == "teams" and args.out:
+    Path(args.out).write_text(json.dumps(config.get("teams", {"status":"ok", "events":[], "errors":[]})))
 print(config.get(args.kind + "_stdout", "fixture complete"))
 print(config.get(args.kind + "_stderr", ""), file=sys.stderr, end="")
 sys.exit(config.get(args.kind + "_code", 0))
@@ -61,6 +70,7 @@ class IdleFixture(unittest.TestCase):
         self.env.update(HOME=str(self.home),
                         FOLLOWUP_IDLE_SCAN_CMD=self.command("scan"),
                         FOLLOWUP_IDLE_PREFLIGHT_CMD=self.command("preflight"),
+                        FOLLOWUP_IDLE_TEAMS_CMD=self.command("teams"),
                         FOLLOWUP_IDLE_NOTIFY_CMD=self.command("notify"))
 
         binary = self.home / "bin"
@@ -96,7 +106,7 @@ class IdleFixture(unittest.TestCase):
         if explicit:
             args.extend(["--scan-cmd", self.command("scan"),
                          "--preflight-cmd", self.command("preflight")])
-        response = subprocess.run(args, env=self.env, capture_output=True, text=True, timeout=10)
+        response = subprocess.run(args, env=self.env, capture_output=True, text=True, timeout=bound(10))
         self.assertEqual(response.stderr, "")
         self.assertEqual(len(response.stdout.splitlines()), 1)
         data = json.loads(response.stdout)
@@ -120,6 +130,27 @@ class IdleChecks(IdleFixture):
         self.assertEqual((data["events"], data["queue"]), (0, {}))
         self.assertEqual(self.recorded("scan")[0]["out"], str(self.state / "followup-scan.json"))
         self.assertEqual(self.recorded("preflight"), [])
+
+    def test_unavailable_teams_health_does_not_hide_jira_event(self):
+        self.configure(teams={"status":"unavailable", "error":"TEAMS_WORKER_NOT_READY", "events":[], "errors":[]},
+                       scan={"events":[{"key":"PROJ-1001","id":"100"}],"errors":[]})
+        code, data = self.check()
+        self.assertEqual(code, 1)
+        self.assertEqual(data['monitoringStatus'], 'unavailable')
+        self.assertEqual(data['events'], 1)
+        self.assertIn('scanSeconds', data['timings'])
+
+    def test_unavailable_teams_keeps_queue_approval_and_focus_runnable(self):
+        self.configure(teams={"status":"unavailable", "error":"CLI_BUSY", "events":[], "errors":[]})
+        for reason in ('queue','approval','focus'):
+            with self.subTest(reason=reason):
+                self.queue(None if reason == 'queue' else 'reporter')
+                self.write_json('guard-state.json', {})
+                self.write_json('approvals.json', {'PROJ-1001':{'stg':'approved'}} if reason == 'approval' else {})
+                (self.state/'pending-focus.jsonl').write_text('{"key":"PROJ-1001"}\n' if reason == 'focus' else '')
+                code,data=self.check()
+                self.assertEqual(code,1)
+                self.assertEqual(data['monitoringStatus'],'unavailable')
 
     def test_all_waiting_with_absent_or_used_approval_is_idle(self):
         self.write_json("followup-queue.json", {
@@ -148,6 +179,15 @@ class IdleChecks(IdleFixture):
         self.write_json("approvals.json", {"PROJ-1001": {"stg": "fixture approval", "at": "2026-10-20"}})
         self.assert_idle(False)
         self.queue("reporter")
+        self.assert_idle(False)
+
+    def test_unused_stg_approval_waits_for_environment(self):
+        # 2026-11-09 PROJ-1501: stg VPN이 막힌 동안 미사용 승인만으로 tick마다 오케스트레이터가 떴다.
+        self.queue("env-human", needs="stg-web,stg-kube")
+        self.configure(preflight_code=10)
+        self.write_json("approvals.json", {"PROJ-1001": {"stg": "fixture approval", "at": "2026-11-06"}})
+        self.assert_idle(True)
+        self.configure(preflight_code=0)  # 환경이 풀리면 그대로 깨운다.
         self.assert_idle(False)
 
     def test_unused_approval_without_matching_queue_item_resumes_work(self):
@@ -226,6 +266,65 @@ class IdleChecks(IdleFixture):
         self.assert_idle(True, explicit=True)
 
 
+class ExceptionDetails(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+
+    def scan(self, argv):
+        Path(argv[argv.index('--out') + 1]).write_text('{"events": [], "errors": []}')
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    def assert_recorded(self, result, error):
+        detail = f'{type(error).__name__}: {str(error)[:300]}'
+        self.assertIn(detail, result['internalErrors'])
+        saved = json.loads((self.directory / 'guard-last.json').read_text())
+        self.assertIn(detail, saved['internalErrors'])
+
+    def test_scan_exception_type_and_truncated_message_are_saved(self):
+        for error in (ValueError('fixture-' + 'x' * 350),
+                      OSError('fixture read failure'),
+                      subprocess.TimeoutExpired(['scan-stub'], 300)):
+            with self.subTest(kind=type(error).__name__), patch.object(idle, 'run', side_effect=error), \
+                    patch.object(idle, 'notify', return_value=True):
+                result, code = idle.decide(self.directory, ['scan-stub'], ['preflight-stub'])
+                self.assertEqual(code, 2)
+                self.assertIn('internal-error', result['reasons'])
+                self.assert_recorded(result, error)
+
+    def test_teams_exception_keeps_idle_status_and_saves_detail(self):
+        error = ValueError('fixture teams failure')
+
+        def run(argv):
+            if argv[0] == 'teams-stub':
+                raise error
+            return self.scan(argv)
+
+        with patch.object(idle, 'run', side_effect=run), patch.object(idle, 'notify', return_value=True):
+            result, code = idle.decide(self.directory, ['scan-stub'], ['preflight-stub'],
+                                       teams_cmd=['teams-stub'])
+        self.assertEqual(code, 0)
+        self.assertIn('teams-unavailable:TEAMS_SCAN_FAILED', result['reasons'])
+        self.assert_recorded(result, error)
+
+    def test_notification_exception_keeps_idle_status_and_saves_detail(self):
+        (self.directory / 'followup-queue.json').write_text('{"PROJ-1": {"waiting": "human-risk"}}')
+        error = OSError('fixture notification failure')
+
+        def run(argv):
+            if argv[0] == 'notify-stub':
+                raise error
+            return self.scan(argv)
+
+        with patch.dict(os.environ, FOLLOWUP_IDLE_NOTIFY_CMD='notify-stub'), \
+                patch.object(idle, 'run', side_effect=run):
+            result, code = idle.decide(self.directory, ['scan-stub'], ['preflight-stub'])
+        self.assertEqual(code, 0)
+        self.assertEqual(result['notify'], 'failed')
+        self.assert_recorded(result, error)
+
+
 class GuardChecks(IdleFixture):
     def setUp(self):
         super().setUp()
@@ -241,10 +340,18 @@ class GuardChecks(IdleFixture):
 
     def guard(self, script=GUARD):
         response = subprocess.run(["/bin/bash", str(script)], env=self.env,
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=bound(10))
         self.assertEqual(response.returncode, 0)
         self.assertEqual(response.stderr, "")
         return response.stdout
+
+    def test_unavailable_monitoring_is_visible_in_guard_and_journal(self):
+        self.tick()
+        self.configure(teams={"status":"unavailable", "error":"TEAMS_WORKER_NOT_READY", "events":[], "errors":[]})
+        output = self.guard()
+        self.assertIn('skipping duplicate (monitoring-unavailable:', output)
+        journal = next(self.state.glob('followup-*.md')).read_text()
+        self.assertIn('monitoring-unavailable(guard)', journal)
 
     def test_tick_idle_skips_without_lock_and_appends_one_table_line(self):
         self.tick()
@@ -270,13 +377,13 @@ class GuardChecks(IdleFixture):
         self.tick()
         self.env["FIXTURE_PASEO_OUTPUT"] = "paseo-once: skipping duplicate"
         response = subprocess.run(["/bin/bash", str(GUARD), "--manual"], env=self.env,
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=bound(10))
         self.assertEqual(response.returncode, 0)
         self.assertEqual(response.stdout.splitlines(), ["manual run", "mode=tick"])
         self.assertTrue((self.state / "running").exists())
         self.assertEqual(self.recorded("scan"), [])
         again = subprocess.run(["/bin/bash", str(GUARD), "--manual"], env=self.env,
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=bound(10))
         self.assertIn("skipping duplicate (running)", again.stdout)
 
     def test_release_removes_lock_without_scanning(self):
@@ -284,7 +391,7 @@ class GuardChecks(IdleFixture):
         lock.write_text("1\n")
         (self.state / "liveness").write_text("off\n")
         response = subprocess.run(["/bin/bash", str(GUARD), "--release"], env=self.env,
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=bound(10))
         self.assertEqual(response.returncode, 0)
         self.assertEqual(response.stdout.splitlines(), ["jira-daily-guard: released"])
         self.assertFalse(lock.exists())

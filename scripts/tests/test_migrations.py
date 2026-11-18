@@ -227,6 +227,8 @@ class ApprovalGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             here = Path(temp)
             shutil.copy(ROOT / "stg-approval-request", here / "stg-approval-request")
+            shutil.copy(ROOT / "factory_hold.py", here / "factory_hold.py")  # 일시정지 게이트(hold.json 없음 = 통과)
+            shutil.copy(ROOT / "followup_config.py", here / "followup_config.py")  # factory_hold가 읽는 설정
             log = here / "calls"
             (here / "check_migrations.py").write_text("import os, sys\nfrom pathlib import Path\nPath(os.environ['CALLS']).write_text('check')\nsys.exit(int(os.environ['CHECK_CODE']))\n")
             (here / "decision-request").write_text('#!/bin/bash\nprintf page >> "$CALLS"\n')
@@ -234,13 +236,13 @@ class ApprovalGate(unittest.TestCase):
                 with self.subTest(code=code):
                     result = subprocess.run(["/bin/bash", str(here / "stg-approval-request"), "PROJ-1389"],
                                             capture_output=True, text=True,
-                                            env={**os.environ, "CALLS": str(log), "CHECK_CODE": str(code)}, timeout=10)
+                                            env={**os.environ, "CALLS": str(log), "CHECK_CODE": str(code), "JIRA_WAKE_DIR": temp}, timeout=10)
                     self.assertEqual(result.returncode, code)
                     self.assertEqual(log.read_text(), "check")
                     self.assertIn("human-risk", result.stderr)
             result = subprocess.run(["/bin/bash", str(here / "stg-approval-request"), "PROJ-1389"],
                                     capture_output=True, text=True,
-                                    env={**os.environ, "CALLS": str(log), "CHECK_CODE": "0"}, timeout=10)
+                                    env={**os.environ, "CALLS": str(log), "CHECK_CODE": "0", "JIRA_WAKE_DIR": temp}, timeout=10)
             self.assertEqual(result.returncode, 0)
             self.assertEqual(log.read_text(), "checkpage")
 

@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""조건 하나가 맞을 때까지 기다린다. `until …; do sleep N; done` 대기 루프 대신 쓴다.
+
+2026-11-03~11-10 세션의 대기 루프 546회(19시간)는 20~30초 간격이라 대기마다 10~15초를 더 썼고, 실패한 작업도
+성공 표시만 보다가 10분 Bash 한도까지 말없이 돌았다. 여기서는 1초 간격으로 보고, 실패 표시가 보이면 바로 끝낸다.
+
+Usage: wait-for <조건 하나> [--timeout 570] [--interval 1] [--fail-grep REGEX FILE]... [--since-now] [--newer-than EPOCH]
+  --file PATH            PATH가 생김
+  --gone PATH            PATH가 없어짐
+  --grep REGEX FILE      FILE에 REGEX에 맞는 줄이 생김(--since-now면 시작 뒤에 붙은 줄만)
+  --pid-gone PID         프로세스가 끝남
+  --port N [--host H]    TCP 연결 성공(기본 127.0.0.1)
+  --url URL [--status N] HTTP 응답(기본 500 미만 아무 상태, --status면 그 상태만)
+  --worker PATH          jira-worker 영수증(attempt 폴더의 worker.json 또는 <결과>.worker.json)의 outcome이
+                         completed면 성공, 그 밖의 값(failed·timeout·launch-failed)이면 실패
+  --cmd SHELL            셸 명령이 exit 0(Jenkins·CI 상태 조회처럼 파일로 볼 수 없는 것. 원격이면 --interval 15)
+--newer-than EPOCH(작업을 띄우기 전 `date +%s`)면 --file·--worker는 그 시각 뒤에 쓰인 파일만 본다. 같은 단위 재시도의
+<결과>.worker.json은 이전 시도 영수증을 덮어쓰기 전까지 남아 있다. 재실행해도 같은 값을 주면 사이에 끝난 작업을 놓치지 않는다.
+출력은 마지막 한 줄: `met after 12s: …` / `timeout after 570s: …; last seen: …` / `failed after 8s: …`.
+Exit: 0 성공, 3 시간 초과(작업이 살아 있으면 같은 명령을 다시 실행), 4 실패, 2 잘못된 사용.
+파일을 만들거나 지우지 않는다.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import sys
+import time
+
+# urllib·subprocess는 그 조건에서만 import한다(시작이 0.3초 빨라진다).
+MET, TIMEOUT, FAILED, USAGE = 0, 3, 4, 2
+
+
+def short(text, limit=160):
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+class Tail:
+    """파일에 새로 붙은 줄을 순서대로 읽는다. 잘려서 작아지면 처음부터 다시 읽는다."""
+
+    def __init__(self, path, since_now):
+        self.path = Path(path)
+        self.offset = self.size() if since_now else 0
+        self.partial = b""
+        self.rules = []  # (regex, kind)
+
+    def size(self):
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return 0
+
+    def lines(self):
+        size = self.size()
+        if size < self.offset:
+            self.offset, self.partial = 0, b""
+        if size == self.offset:
+            return [self.partial] if self.partial else []
+        try:
+            with self.path.open("rb") as stream:
+                stream.seek(self.offset)
+                chunk = stream.read(size - self.offset)
+        except OSError:
+            return []
+        self.offset += len(chunk)
+        parts = (self.partial + chunk).split(b"\n")
+        self.partial = parts.pop()
+        # 아직 줄바꿈이 없는 끝 조각도 본다(마지막 줄에 줄바꿈 없이 끝나는 파일).
+        return parts + ([self.partial] if self.partial else [])
+
+    def scan(self):
+        """처음 맞은 (kind, line). 같은 파일 안에서는 먼저 나온 줄이 이긴다."""
+        for raw in self.lines():
+            line = raw.decode("utf-8", "replace").rstrip("\r")
+            for regex, kind in self.rules:
+                if regex.search(line):
+                    return kind, line
+        return None
+
+
+def fresh_mtime(path, since):
+    try:
+        return path.stat().st_mtime >= since
+    except OSError:
+        return False
+
+
+def check_worker(path, since):
+    receipt = path / "worker.json" if path.is_dir() else path
+    if not receipt.exists():
+        return None, f"no receipt at {receipt}"
+    if since is not None and not fresh_mtime(receipt, since):
+        return None, f"receipt at {receipt} is older than --newer-than"
+    try:
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return None, f"unreadable receipt ({short(error, 60)})"
+    outcome = data.get("outcome") if isinstance(data, dict) else None
+    if outcome is None:
+        return None, "receipt without outcome"
+    summary = f"worker outcome={outcome} exitCode={data.get('exitCode')} stageComplete={data.get('stageComplete')}"
+    if data.get("cancellationFailed"):
+        summary += " cancellationFailed=true"
+    return (MET if outcome == "completed" else FAILED), summary
+
+
+def check_url(url, status, timeout):
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=timeout) as response:
+            code = response.status
+    except urllib.error.HTTPError as error:
+        code = error.code
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        return None, short(getattr(error, "reason", error), 80)
+    ok = code == status if status is not None else code < 500
+    return (MET if ok else None), f"HTTP {code}"
+
+
+def parse(argv):
+    parser = argparse.ArgumentParser(prog="wait-for", description="조건 하나가 맞을 때까지 기다린다.")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--file", metavar="PATH")
+    group.add_argument("--gone", metavar="PATH")
+    group.add_argument("--grep", nargs=2, metavar=("REGEX", "FILE"))
+    group.add_argument("--pid-gone", type=int, metavar="PID")
+    group.add_argument("--port", type=int, metavar="N")
+    group.add_argument("--url")
+    group.add_argument("--worker", metavar="PATH")
+    group.add_argument("--cmd", metavar="SHELL")
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--status", type=int, default=None)
+    parser.add_argument("--since-now", action="store_true")
+    parser.add_argument("--newer-than", type=float, default=None, metavar="EPOCH")
+    parser.add_argument("--fail-grep", nargs=2, action="append", default=[], metavar=("REGEX", "FILE"))
+    parser.add_argument("--timeout", type=float, default=570)
+    parser.add_argument("--interval", type=float, default=1)
+    args = parser.parse_args(argv)
+    if args.timeout <= 0 or args.interval <= 0:
+        parser.error("--timeout and --interval must be positive")
+    if args.host is not None and args.port is None:
+        parser.error("--host needs --port")
+    if args.status is not None and args.url is None:
+        parser.error("--status needs --url")
+    if args.since_now and not (args.grep or args.fail_grep):
+        parser.error("--since-now needs --grep or --fail-grep")
+    if args.newer_than is not None and not (args.file or args.worker):
+        parser.error("--newer-than needs --file or --worker")
+    try:
+        args.patterns = [re.compile(args.grep[0])] if args.grep else []
+        args.fail_patterns = [re.compile(regex) for regex, _ in args.fail_grep]
+    except re.error as error:
+        parser.error(f"invalid regex: {error}")
+    return args
+
+
+def main(argv=None):
+    args = parse(sys.argv[1:] if argv is None else argv)
+    started = time.monotonic()
+    since = args.newer_than
+
+    tails = {}
+
+    def tail(path):
+        key = os.path.abspath(path)
+        if key not in tails:
+            tails[key] = Tail(path, args.since_now)
+        return tails[key]
+
+    for (_, path), regex in zip(args.fail_grep, args.fail_patterns):
+        tail(path).rules.append((regex, FAILED))
+    if args.grep:
+        tail(args.grep[1]).rules.append((args.patterns[0], MET))
+
+    if args.file:
+        what = f"file {args.file}"
+    elif args.gone:
+        what = f"{args.gone} gone"
+    elif args.grep:
+        what = f"/{args.grep[0]}/ in {args.grep[1]}"
+    elif args.pid_gone is not None:
+        what = f"pid {args.pid_gone} gone"
+    elif args.port is not None:
+        what = f"port {args.host or '127.0.0.1'}:{args.port}"
+    elif args.url:
+        what = f"{args.url} answers" + (f" {args.status}" if args.status is not None else " <500")
+    elif args.worker:
+        what = f"worker receipt {args.worker}"
+    else:
+        what = f"command succeeds: {short(args.cmd, 80)}"
+
+    def remaining():
+        return args.timeout - (time.monotonic() - started)
+
+    def poll():
+        """(결과 코드 또는 None, 설명)."""
+        failed = None
+        met_line = None
+        for item in tails.values():
+            hit = item.scan()
+            if hit and hit[0] == FAILED and failed is None:
+                failed = hit[1]
+            elif hit and hit[0] == MET:
+                met_line = hit[1]
+        if failed is not None:
+            return FAILED, short(failed)
+        if args.grep:
+            if met_line is not None:
+                return MET, short(met_line)
+            path = Path(args.grep[1])
+            return None, "no matching line" if path.exists() else f"{path} missing"
+        if args.file:
+            path = Path(args.file)
+            if path.exists() and (since is None or fresh_mtime(path, since)):
+                return MET, what
+            return None, "missing" if not path.exists() else "older than --newer-than"
+        if args.gone:
+            return (MET, what) if not os.path.lexists(args.gone) else (None, "still exists")
+        if args.pid_gone is not None:
+            try:
+                os.kill(args.pid_gone, 0)
+            except ProcessLookupError:
+                return MET, what
+            except PermissionError:
+                pass
+            return None, f"pid {args.pid_gone} running"
+        if args.port is not None:
+            try:
+                with socket.create_connection((args.host or "127.0.0.1", args.port),
+                                              timeout=max(0.1, min(2.0, remaining()))):
+                    return MET, what
+            except OSError as error:
+                return None, short(error, 80)
+        if args.url:
+            code, seen = check_url(args.url, args.status, max(0.1, min(10.0, remaining())))
+            return code, (what + f" ({seen})" if code == MET else seen)
+        if args.worker:
+            return check_worker(Path(args.worker), since)
+        import subprocess
+        try:
+            result = subprocess.run(args.cmd, shell=True, capture_output=True, text=True,
+                                    timeout=max(0.1, remaining()), stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return None, None  # 마지막 확인이 시간 안에 못 끝남: 앞서 본 상태를 남긴다
+        output = [line for line in (result.stdout + result.stderr).splitlines() if line.strip()]
+        last = short(output[-1], 120) if output else "no output"
+        return (MET, f"{what} ({last})") if result.returncode == 0 else (None, f"exit {result.returncode}: {last}")
+
+    last_seen = "command still running at timeout"
+    while True:
+        code, seen = poll()
+        seen = last_seen = seen or last_seen
+        elapsed = round(time.monotonic() - started)
+        if code == MET:
+            print(f"met after {elapsed}s: {seen}")
+            return MET
+        if code == FAILED:
+            print(f"failed after {elapsed}s: {seen}")
+            return FAILED
+        left = remaining()
+        if left <= 0:
+            print(f"timeout after {elapsed}s: {what}; last seen: {seen}")
+            return TIMEOUT
+        time.sleep(min(args.interval, left))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
